@@ -169,7 +169,7 @@ def deliver_followup(text: str, requester: dict) -> None:
         domain, _, name = service.partition(".")
         short = summary(text)
         calls.append((f"services/{domain}/{name}", {
-            "title": "Claude Code", "message": short if short == text else short + "\n(Full answer in Assist.)",
+            "title": "Claude Code", "message": short + "\n(Send any message in Assist to see the full answer.)",
             "data": {"tag": "claude_code_assist", "group": "claude_code_assist"},
         }))
     if not calls:
@@ -702,11 +702,19 @@ def status() -> dict:
     }
 
 
+def client_kind(req: dict) -> str:
+    """voice: a satellite (results are spoken); app: Companion app (results as push + next reply); browser."""
+    if (req.get("followup") or {}).get("announce"):
+        return "voice"
+    return "app" if req.get("device") else "browser"
+
+
 def request_context(req: dict, owner: dict) -> str:
     tasks = SESSION.task_summary(owner)
     return (
         f"[Home Assistant Assist | user: {req.get('user') or 'unknown'}"
-        f" | device: {req.get('device') or 'unknown'} | language: {req.get('language') or 'unknown'}"
+        f" | device: {req.get('device') or 'unknown'} | client: {client_kind(req)}"
+        f" | language: {req.get('language') or 'unknown'}"
         f" | time: {time.strftime('%Y-%m-%d %H:%M')}"
         + (f" | running background tasks: {tasks}" if tasks else "")
         + "]"

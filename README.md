@@ -51,7 +51,7 @@ that…") and keeps working in the background. The result goes back to **the dev
 | Asked from | Result |
 |---|---|
 | Assist in the browser | Streamed into the **same reply** while the chat is open (up to `followup_wait_seconds`); a new question in the same chat takes over the wait. |
-| Companion app (phone, watch) | The reply closes after the answer (the app mixes up streamed text of overlapping replies). The result is sent as a **short push notification** and shown in full at the **top of your next Assist reply**, separated by a blank line. |
+| Companion app (phone, watch) | The reply closes after the answer (the app mixes up streamed text of overlapping replies). The result is sent as a **short push notification** and shown in full at the **top of your next Assist reply** (send any message), separated by a blank line. Claude mentions this when it starts the task; the header tells it the client (`app`, `browser`, `voice`). |
 | Voice satellite (e.g. Home Assistant Voice) | Answer right away; the result is **spoken on the same satellite** (`assist_satellite.announce`). |
 | Unknown | Persistent notification in Home Assistant, and at the top of the user's next reply. |
 
