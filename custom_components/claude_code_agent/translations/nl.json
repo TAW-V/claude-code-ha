@@ -1,0 +1,16 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Claude Code Assist",
+        "description": "Connect to the Claude Code Assist app. Leave the token empty to read it automatically from the app.",
+        "data": { "url": "Bridge URL", "token": "Bridge token (optional)" }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot reach the Claude Code Assist app. Is it installed and running?",
+      "no_token": "No token found. Start the Claude Code Assist app first."
+    },
+    "abort": { "already_configured": "Already configured" }
+  }
+}

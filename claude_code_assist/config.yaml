@@ -1,0 +1,34 @@
+name: Claude Code Assist
+version: "0.1.0"
+slug: claude_code_assist
+description: Claude Code (your own subscription) as a Home Assistant conversation agent, with tool use
+url: https://github.com/TAW-V/claude-code-ha
+arch:
+  - amd64
+init: false
+startup: services
+boot: auto
+homeassistant_api: true
+hassio_api: true
+hassio_role: admin
+auth_api: false
+map:
+  - type: homeassistant_config
+    read_only: false
+    path: /config
+  - type: addons
+    read_only: false
+  - type: share
+    read_only: false
+  - type: backup
+    read_only: true
+options:
+  oauth_token: ""
+  model: sonnet
+  timeout_seconds: 180
+  extra_instructions: ""
+schema:
+  oauth_token: password
+  model: str
+  timeout_seconds: int(30,600)
+  extra_instructions: str?
