@@ -135,6 +135,9 @@ class ClaudeSession:
         self.folded: dict = {}  # root -> result text, notifications injected into the turn in progress
         self.listeners: dict = {}  # owner key -> list of pending texts, for an open Assist reply
         self.listener_reqs: dict = {}  # owner key -> requests whose work that open reply is waiting for
+        # owner key -> {"reqs", "items"}: work and results of a reply that was closed because a new question arrived
+        # from the same chat, kept until that question's reply takes them over.
+        self.handover: dict = {}
         self.jobs: list = []  # report jobs: {"owner", "root", "fallback", "not_before", "if_notified"}
         self.restart_pending = False
         threading.Thread(target=self._job_worker, daemon=True).start()
@@ -354,6 +357,8 @@ class ClaudeSession:
         for owner in owners:
             with self.cond:
                 listener = self.listeners.get(owner_key(owner))
+                if listener is None and owner_key(owner) in self.handover:
+                    listener = self.handover[owner_key(owner)]["items"]
                 if listener is not None:
                     listener.append(text)
                     self.cond.notify_all()
@@ -459,13 +464,15 @@ class ClaudeSession:
         notifications/announcements, like later results.
         """
         key = owner_key(owner)
-        mine: list = []
         with self.cond:
-            # A new question from the same chat takes over the open reply, including the work it was waiting for,
-            # so results of earlier questions appear under the newest answer instead of being pushed.
-            reqs = {owner.get("req")} | (self.listener_reqs.get(key, set()) if key in self.listeners else set())
+            # Take over the work (and any results already in) of the reply this question closed, so results of
+            # earlier questions appear under the newest answer instead of being pushed.
+            handed = self.handover.pop(key, None) or {"reqs": set(), "items": []}
+            reqs = {owner.get("req")} | handed["reqs"]
+            mine: list = list(handed["items"])
             self.listeners[key] = mine
             self.listener_reqs[key] = reqs
+            self.cond.notify_all()
         deadline = time.time() + max_wait
         had_work = False
         undelivered: list = []
@@ -477,6 +484,12 @@ class ClaudeSession:
                     self.cond.wait_for(lambda: mine or self.listeners.get(key) is not mine or not active(),
                                        timeout=15)
                     had_work = had_work or active()
+                    if self.listeners.get(key) is not mine:
+                        # Closed because a new question came in from this chat: hand pending results over to it.
+                        if key in self.handover:
+                            self.handover[key]["items"].extend(mine)
+                            mine[:] = []
+                        return
                     if had_work and not mine and self.listeners.get(key) is mine and not active():
                         # A finished task is followed by a reporting turn a moment later; give it time to start.
                         self.cond.wait_for(lambda: mine or self.listeners.get(key) is not mine or active(),
@@ -505,6 +518,25 @@ class ClaudeSession:
                 leftover, mine[:] = undelivered + list(mine), []
             for text in leftover:
                 threading.Thread(target=deliver_followup, args=(text, owner), daemon=True).start()
+
+    def take_over(self, owner: dict) -> None:
+        """A new question from this chat: close its open reply right away (before the new answer streams; the
+        Companion app mixes up streamed text of overlapping replies) and keep its work for the new reply."""
+        key = owner_key(owner)
+        with self.cond:
+            if key not in self.listeners:
+                return
+            self.listeners.pop(key)
+            handed = self.handover.setdefault(key, {"reqs": set(), "items": []})
+            handed["reqs"] |= self.listener_reqs.pop(key, set())
+            self.cond.notify_all()
+
+    def release_handover(self, owner: dict) -> None:
+        """The new question did not open a reply after all: results kept for it become notifications."""
+        with self.cond:
+            handed = self.handover.pop(owner_key(owner), None)
+        for text in (handed or {}).get("items", []):
+            threading.Thread(target=deliver_followup, args=(text, owner), daemon=True).start()
 
     # ---------- maintenance ----------
     def request_restart(self) -> None:
@@ -706,16 +738,22 @@ class Handler(BaseHTTPRequestHandler):
                 return False
 
         owner = {"user": req.get("user"), "device": req.get("device"), "followup": req.get("followup") or {}}
+        SESSION.take_over(owner)
         started = time.time()
         text, ok = SESSION.ask(f"{request_context(req, owner)}\n{req.get('text', '')}", owner=owner)
         log(f"{time.time() - started:.1f}s ok={ok} device={req.get('device')!r} q={req.get('text', '')[:80]!r}")
+        followed = False
         try:
             emit({"type": "text", "text": to_speech(text) or "I did not get an answer."})
             if ok and req.get("follow", True):
+                followed = True  # follow() takes over the handed-over work itself
                 SESSION.follow(owner, emit, alive)
             emit({"type": "done"})
         except OSError:
             log("stream closed by client; further results become notifications")
+        finally:
+            if not followed:  # this question opened no reply: work handed over to it must not be lost
+                SESSION.release_handover(owner)
 
 
 if __name__ == "__main__":
