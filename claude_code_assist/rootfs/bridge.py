@@ -117,6 +117,53 @@ def summary(text: str, limit: int = 180) -> str:
     return (cut[: end + 1] if end > 60 else cut.rsplit(" ", 1)[0]) + " …"
 
 
+# ---------- chat history: per user, shown in the panel chat; includes Assist exchanges and results ----------
+CHAT_FILE = "/data/chat_history.json"
+CHAT_LOCK = threading.Lock()
+CHAT_KEEP = 300  # messages per user
+
+
+def _chat_load() -> dict:
+    try:
+        with open(CHAT_FILE) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {"next_id": 1, "users": {}}
+
+
+def chat_add(user: str | None, role: str, text: str, source: str) -> None:
+    if not user or not text.strip():
+        return
+    with CHAT_LOCK:
+        data = _chat_load()
+        msgs = data["users"].setdefault(user, [])
+        msgs.append({"id": data["next_id"], "ts": time.strftime("%Y-%m-%d %H:%M"), "role": role,
+                     "text": text.strip(), "source": source})
+        data["next_id"] += 1
+        data["users"][user] = msgs[-CHAT_KEEP:]
+        with open(CHAT_FILE + ".tmp", "w") as f:
+            json.dump(data, f)
+        os.replace(CHAT_FILE + ".tmp", CHAT_FILE)
+
+
+def chat_since(user: str, since: int) -> list:
+    with CHAT_LOCK:
+        return [m for m in _chat_load()["users"].get(user, []) if m["id"] > since]
+
+
+def chat_clear(user: str) -> None:
+    with CHAT_LOCK:
+        data = _chat_load()
+        data["users"].pop(user, None)
+        with open(CHAT_FILE + ".tmp", "w") as f:
+            json.dump(data, f)
+        os.replace(CHAT_FILE + ".tmp", CHAT_FILE)
+
+
+PANEL_DEVICE = "Claude Code panel"
+PANEL_BUSY: dict = {}  # user -> number of panel messages waiting for an answer
+
+
 # ---------- temporary automations ----------
 TMP_ALIAS = re.compile(r"^\s*TMP until (\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})\s*\|")
 
@@ -437,6 +484,10 @@ class ClaudeSession:
         if not text.strip():
             return
         for owner in owners:
+            if owner and (final or owner.get("panel")):
+                chat_add(owner.get("user"), "assistant", to_speech(text) if not owner.get("panel") else text, "result")
+            if owner and owner.get("panel"):
+                continue  # the panel chat shows it from the history
             with self.cond:
                 listener = self.listeners.get(owner_key(owner))
                 if listener is None and owner_key(owner) in self.handover:
@@ -703,7 +754,10 @@ def status() -> dict:
 
 
 def client_kind(req: dict) -> str:
-    """voice: a satellite (results are spoken); app: Companion app (results as push + next reply); browser."""
+    """voice: a satellite (results are spoken); app: Companion app (results as push + next reply); browser;
+    panel: the chat in the app's own web page (results appear there by themselves)."""
+    if req.get("client") == "panel":
+        return "panel"
     if (req.get("followup") or {}).get("announce"):
         return "voice"
     return "app" if req.get("device") else "browser"
@@ -719,6 +773,19 @@ def request_context(req: dict, owner: dict) -> str:
         + (f" | running background tasks: {tasks}" if tasks else "")
         + "]"
     )
+
+
+def panel_ask(user: str, text: str) -> None:
+    """A message from the panel chat; the answer and any later results go into the user's chat history."""
+    owner = {"user": user, "device": PANEL_DEVICE, "panel": True, "followup": {}}
+    req = {"user": user, "device": PANEL_DEVICE, "client": "panel", "language": "unknown"}
+    started = time.time()
+    try:
+        answer, ok = SESSION.ask(f"{request_context(req, owner)}\n{text}", owner=owner)
+        chat_add(user, "assistant", answer or "I did not get an answer.", "panel")
+        log(f"{time.time() - started:.1f}s ok={ok} device='panel' q={text[:80]!r}")
+    finally:
+        PANEL_BUSY[user] = max(0, PANEL_BUSY.get(user, 1) - 1)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -743,10 +810,21 @@ class Handler(BaseHTTPRequestHandler):
             self._reply(400, {"error": "bad json"})
             return None
 
+    def _panel_user(self) -> str:
+        """The Home Assistant user behind an ingress request (the Supervisor passes it in headers)."""
+        return (self.headers.get("X-Remote-User-Display-Name") or self.headers.get("X-Remote-User-Name")
+                or "unknown")
+
     def do_GET(self):
-        path = self.path.split("?")[0]
+        path, _, query = self.path.partition("?")
         if path == "/health":
             self._reply(200, status())
+        elif self._from_ingress() and path == "/api/chat":
+            user = self._panel_user()
+            since = int((re.search(r"since=(\d+)", query) or [0, 0])[1])
+            self._reply(200, {"user": user, "messages": chat_since(user, since),
+                              "pending": PANEL_BUSY.get(user, 0) > 0,
+                              "background_tasks": SESSION.task_summary(None) or None})
         elif path == "/instructions" and self.headers.get("Authorization") == f"Bearer {TOKEN}":
             with open(INSTRUCTIONS_FILE) as f:
                 self._reply(200, {"instructions": f.read()})
@@ -775,6 +853,21 @@ class Handler(BaseHTTPRequestHandler):
             return
         req = self._body()
         if req is None:
+            return
+        if path == "/chat/send" and self._from_ingress():
+            text = (req.get("text") or "").strip()
+            if not text:
+                self._reply(400, {"error": "empty message"})
+                return
+            user = self._panel_user()
+            chat_add(user, "user", text, "panel")
+            PANEL_BUSY[user] = PANEL_BUSY.get(user, 0) + 1
+            threading.Thread(target=panel_ask, args=(user, text), daemon=True).start()
+            self._reply(202, {"ok": True})
+            return
+        if path == "/chat/clear" and self._from_ingress():
+            chat_clear(self._panel_user())
+            self._reply(200, {"ok": True})
             return
         if path == "/instructions":
             text = (req.get("text") or "").replace("\r\n", "\n")
@@ -841,7 +934,9 @@ class Handler(BaseHTTPRequestHandler):
             except OSError:
                 inbox_add(owner.get("user"), earlier)
         started = time.time()
+        chat_add(owner.get("user"), "user", req.get("text", ""), "assist")
         text, ok = SESSION.ask(f"{request_context(req, owner)}\n{req.get('text', '')}", owner=owner)
+        chat_add(owner.get("user"), "assistant", to_speech(text), "assist")
         log(f"{time.time() - started:.1f}s ok={ok} device={req.get('device')!r} q={req.get('text', '')[:80]!r}")
         followed = False
         try:

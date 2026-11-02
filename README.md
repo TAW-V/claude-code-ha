@@ -90,7 +90,14 @@ passed (and fires a `claude_code_assist_cleanup` event). `POST /cleanup` runs it
 
 ## Web UI
 
-Open the app (**Open Web UI**, or **Claude Code** in the sidebar for admins) to:
+Open the app (**Open Web UI**, or **Claude Code** in the sidebar for admins).
+
+**Chat tab:** a chat with the same Claude Code conversation that keeps its history (per Home Assistant user, also
+in the Companion app's sidebar). Your Assist questions, answers and background results are added to it too, so
+nothing is lost when you close Assist. Results of background work started from the chat appear there by
+themselves.
+
+**Settings tab:**
 
 - edit the assistant's standing instructions (`CLAUDE.md`) in a full text editor — describe your home, preferences and
   rules; changes apply from the next message, the conversation itself is kept;

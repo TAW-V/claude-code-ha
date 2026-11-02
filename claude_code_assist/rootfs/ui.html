@@ -24,10 +24,43 @@
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
   button:disabled { opacity: .5; cursor: default; }
   .msg { color: var(--muted); } .hint { color: var(--muted); font-size: 12px; margin: 4px 0 8px; }
+  .tabs { display: flex; gap: 4px; position: sticky; top: 0; background: var(--bg); padding: 8px 0; z-index: 2; }
+  .tabs button { border-radius: 999px; }
+  .tabs button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+  #chatView { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+  #log { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding: 4px 2px 12px; }
+  .bubble { max-width: 85%; padding: 8px 12px; border-radius: 14px; white-space: pre-wrap; word-wrap: break-word; }
+  .bubble.user { align-self: flex-end; background: var(--accent); color: #fff; border-bottom-right-radius: 4px; }
+  .bubble.assistant { align-self: flex-start; background: var(--card); border: 1px solid var(--line); border-bottom-left-radius: 4px; }
+  .bubble.result { border-left: 3px solid var(--accent); }
+  .meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .bubble.user .meta { color: rgba(255,255,255,.8); }
+  .typing { align-self: flex-start; color: var(--muted); font-style: italic; padding: 4px 12px; }
+  .composer { display: flex; gap: 8px; align-items: flex-end; position: sticky; bottom: 0; background: var(--bg); padding: 8px 0; }
+  .composer textarea { min-height: 44px; max-height: 30vh; flex: 1; resize: none; font: inherit; }
+  main.chat { height: 100vh; min-height: 0; }
 </style>
 </head>
 <body>
-<main>
+<main class="chat" id="main">
+  <nav class="tabs">
+    <button id="tabChat" class="active">Chat</button>
+    <button id="tabSettings">Settings</button>
+  </nav>
+
+  <section id="chatView">
+    <div id="log"></div>
+    <div class="composer">
+      <textarea id="input" rows="1" placeholder="Message Claude Code…"></textarea>
+      <button class="primary" id="btnSend">Send</button>
+    </div>
+    <div class="row" style="margin-top:0">
+      <span class="msg" id="chatInfo"></span>
+      <button id="btnClearChat" style="margin-left:auto">Clear history</button>
+    </div>
+  </section>
+
+  <div id="settingsView" hidden>
   <section class="card">
     <h1>Claude Code Assist</h1>
     <div class="status">
@@ -60,6 +93,7 @@
       <span class="msg" id="saveMsg"></span>
     </div>
   </section>
+  </div>
 </main>
 <script>
 const $ = id => document.getElementById(id);
@@ -118,6 +152,63 @@ $("btnReset").onclick = async () => {
 window.addEventListener("beforeunload", e => { if ($("text").value !== saved) e.preventDefault(); });
 refresh(true).catch(e => { $("saveMsg").textContent = "Error: " + e.message; });
 setInterval(() => refresh(false).catch(() => {}), 30000);
+
+// ---------- tabs ----------
+function show(tab) {
+  const chat = tab === "chat";
+  $("chatView").hidden = !chat; $("settingsView").hidden = chat;
+  $("main").classList.toggle("chat", chat);
+  $("tabChat").classList.toggle("active", chat); $("tabSettings").classList.toggle("active", !chat);
+  if (chat) scrollDown();
+}
+$("tabChat").onclick = () => show("chat");
+$("tabSettings").onclick = () => show("settings");
+
+// ---------- chat ----------
+let lastId = 0, sending = false;
+const SOURCE = { assist: "via Assist", result: "background result", panel: "" };
+function scrollDown() { const l = $("log"); l.scrollTop = l.scrollHeight; }
+function addBubble(m) {
+  const div = document.createElement("div");
+  div.className = `bubble ${m.role}` + (m.source === "result" ? " result" : "");
+  div.textContent = m.text;
+  const meta = document.createElement("div");
+  meta.className = "meta"; meta.textContent = [m.ts, SOURCE[m.source]].filter(Boolean).join(" · ");
+  div.appendChild(meta);
+  $("log").appendChild(div);
+}
+async function poll() {
+  try {
+    const nearBottom = $("log").scrollHeight - $("log").scrollTop - $("log").clientHeight < 80;
+    const d = await api("chat?since=" + lastId);
+    for (const m of d.messages) { addBubble(m); lastId = Math.max(lastId, m.id); }
+    let typing = document.querySelector(".typing");
+    if (d.pending && !typing) { typing = document.createElement("div"); typing.className = "typing"; typing.textContent = "Claude is working…"; $("log").appendChild(typing); }
+    if (!d.pending && typing) typing.remove();
+    if (typing) $("log").appendChild(typing);
+    $("chatInfo").textContent = d.background_tasks ? "Running in the background: " + d.background_tasks : `Signed in as ${d.user}`;
+    if (d.messages.length || d.pending) { if (nearBottom || d.messages.some(m => m.role === "user")) scrollDown(); }
+  } catch (e) { $("chatInfo").textContent = "Error: " + e.message; }
+}
+async function send() {
+  const text = $("input").value.trim();
+  if (!text || sending) return;
+  sending = true; $("btnSend").disabled = true;
+  try { await api("chat/send", { text }); $("input").value = ""; autosize(); await poll(); scrollDown(); }
+  catch (e) { $("chatInfo").textContent = "Error: " + e.message; }
+  finally { sending = false; $("btnSend").disabled = false; $("input").focus(); }
+}
+function autosize() { const i = $("input"); i.style.height = "auto"; i.style.height = Math.min(i.scrollHeight, window.innerHeight * 0.3) + "px"; }
+$("input").addEventListener("input", autosize);
+$("input").addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); } });
+$("btnSend").onclick = send;
+$("btnClearChat").onclick = async () => {
+  if (!confirm("Clear your chat history? (Claude's own conversation memory is not affected.)")) return;
+  await api("chat/clear", {}); $("log").innerHTML = ""; lastId = 0; poll();
+};
+show("chat");
+poll().then(scrollDown);
+setInterval(poll, 2000);
 </script>
 </body>
 </html>
