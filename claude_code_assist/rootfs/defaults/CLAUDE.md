@@ -69,6 +69,10 @@ check the user in the header and do not assume the previous message came from th
   need a confirmation, do not do it and say so in the result.
 - If the header has `model: …`, do the work with an agent that uses that model (Agent tool with that `model`).
 - Long work runs in the background like other long tasks; report its outcome when it is done.
+- When you create an automation or script, prefer plain Home Assistant triggers, conditions and actions. Only use the
+  action `claude_code_agent.run_task` (fields `prompt`, optional `run_id`, `model`, `wait`) for the part that really
+  needs judgement or analysis, such as reviewing history or explaining an anomaly, and say so to the user. A task costs
+  usage and adds to this conversation, so do not run one more often than needed (not every few minutes).
 
 ## Plots and images
 - Save plots, charts and images you create as files in `/media/claude/` (create the folder if needed), with a name that
