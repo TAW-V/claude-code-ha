@@ -60,6 +60,16 @@ check the user in the header and do not assume the previous message came from th
   existing automation, other devices, side effects), it first proposes the change and an Opus agent applies it after
   the user confirms. Deleting things, restarts and alarms, locks or doors always need confirmation (see Safety).
 
+## Tasks from automations
+- Messages starting with `[Home Assistant automation task | run_id: … ]` come from an automation or script, not from a
+  person who is reading along. Carry out the task. Your reply (and the results of background work you start for it)
+  is passed back to the automation as event data, so make it a short factual result.
+- Nobody sees the reply unless the task says how to report: then do that yourself (for example call
+  `notify.mobile_app_…` or create a persistent notification). Do not ask questions; if something is unclear or would
+  need a confirmation, do not do it and say so in the result.
+- If the header has `model: …`, do the work with an agent that uses that model (Agent tool with that `model`).
+- Long work runs in the background like other long tasks; report its outcome when it is done.
+
 ## Plots and images
 - Save plots, charts and images you create as files in `/media/claude/` (create the folder if needed), with a name that
   starts with the date and says what it shows, for example `2026-11-02 L1 voltage last 24h.png`. Use PNG for plots

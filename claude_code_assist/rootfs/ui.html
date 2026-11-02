@@ -78,6 +78,7 @@
       <div><span>Last compaction</span><b id="compact">…</b></div>
       <div><span>Session</span><code id="session">…</code></div>
       <div><span>Background tasks</span><b id="tasks">…</b></div>
+      <div><span>Claude Code version</span><b id="version">…</b></div>
     </div>
     <div class="row" id="pendingRow" hidden>
       <span class="msg" id="pendingMsg"></span>
@@ -86,8 +87,15 @@
     <div class="row">
       <button id="btnCompact">Compact now</button>
       <button id="btnReset">Start new conversation</button>
+      <button id="btnUpdate">Update Claude Code now</button>
       <span class="msg" id="sessionMsg"></span>
     </div>
+  </section>
+
+  <section class="card">
+    <h2>Automation tasks</h2>
+    <p class="hint">Recent runs of the action <code>claude_code_agent.run_task</code> from automations and scripts.</p>
+    <div id="taskRuns" class="msg">…</div>
   </section>
 
   <section class="card">
@@ -141,6 +149,7 @@ async function refresh(loadText) {
   $("compact").textContent = (s.last_compact ? s.last_compact.replace("T", " ") : "never") + ` · daily at ${s.compact_hour}:00`;
   $("session").textContent = s.session_id || "new conversation";
   $("tasks").textContent = s.background_tasks || "none";
+  $("version").textContent = s.claude_version + (s.auto_update ? ` · checked daily at ${s.compact_hour}:00` : " · automatic updates off");
   $("pendingRow").hidden = !s.restart_pending;
   $("pendingMsg").textContent = `New instructions are saved but not active yet: Claude Code restarts when its ${s.background_task_count} background task(s) finish.`;
   if (loadText) { saved = s.instructions; $("text").value = saved; dirty(); $("saveMsg").textContent = ""; }
@@ -166,6 +175,31 @@ $("btnRestart").onclick = async () => {
   if (!confirm("Restart Claude Code now? Running background tasks are interrupted; their owners get a notice.")) return;
   await api("restart", {}); $("sessionMsg").textContent = "Restarted; new instructions apply from the next message."; refresh(false);
 };
+$("btnUpdate").onclick = async () => {
+  await api("update", {}); $("sessionMsg").textContent = "Checking for a new Claude Code version… If there is one, Claude Code restarts with it when idle.";
+  setTimeout(() => refresh(false), 30000);
+};
+let lastTasks = "";
+async function loadTasks() {
+  const box = $("taskRuns");
+  try {
+    const d = await api("tasks");
+    const sig = JSON.stringify(d.runs);
+    if (sig === lastTasks) return;  // keep opened details open
+    lastTasks = sig; box.innerHTML = "";
+    if (!d.runs.length) { box.textContent = "No runs yet."; return; }
+    for (const r of d.runs) {
+      const div = document.createElement("div"); div.className = "it " + (r.state === "done" ? "assistant" : r.state === "running" ? "tool" : "result error");
+      const head = document.createElement("div"); head.className = "h";
+      head.textContent = [r.started.replace("T", " "), r.run_id, r.state + (r.duration_seconds != null ? ` (${r.duration_seconds} s)` : ""), r.model].filter(Boolean).join(" · ");
+      const det = document.createElement("details"), sum = document.createElement("summary"), body = document.createElement("div");
+      sum.textContent = (r.result || r.prompt || "").split("\n")[0].slice(0, 160);
+      body.textContent = "Task:\n" + r.prompt + (r.result ? "\n\nResult:\n" + r.result : "");
+      det.append(sum, body); div.append(head, det); box.appendChild(div);
+    }
+  } catch (e) { box.textContent = "Error: " + e.message; }
+}
+loadTasks(); setInterval(() => { if (!$("settingsView").hidden) loadTasks(); }, 10000);
 $("btnReset").onclick = async () => {
   if (!confirm("Start a new conversation? The assistant forgets the current conversation (memory files are kept).")) return;
   await api("reset", {}); $("sessionMsg").textContent = "Next message starts a new conversation."; refresh(false);

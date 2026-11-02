@@ -4,13 +4,46 @@
       "user": {
         "title": "Claude Code Assist",
         "description": "Connect to the Claude Code Assist app. Leave the token empty to read it automatically from the app.",
-        "data": { "url": "Bridge URL", "token": "Bridge token (optional)" }
+        "data": {
+          "url": "Bridge URL",
+          "token": "Bridge token (optional)"
+        }
       }
     },
     "error": {
       "cannot_connect": "Cannot reach the Claude Code Assist app. Is it installed and running?",
       "no_token": "No token found. Start the Claude Code Assist app first."
     },
-    "abort": { "already_configured": "Already configured" }
+    "abort": {
+      "already_configured": "Already configured"
+    }
+  },
+  "services": {
+    "run_task": {
+      "name": "Taak uitvoeren",
+      "description": "Geef Claude Code een taak vanuit een automatisering of script. Hij draait in het gedeelde gesprek; het resultaat komt als event claude_code_assist_task_finished en, met wachten aan, als response.",
+      "fields": {
+        "prompt": {
+          "name": "Taak",
+          "description": "Wat Claude Code moet doen. Niemand leest het antwoord, tenzij de taak zegt hoe te melden (bijvoorbeeld een notificatie)."
+        },
+        "run_id": {
+          "name": "Run-ID",
+          "description": "Naam van deze run, gebruikt in de events en de takenlijst. Wordt gemaakt als leeg."
+        },
+        "model": {
+          "name": "Model",
+          "description": "Model voor het werk, bijvoorbeeld opus. Claude Code gebruikt dan een agent met dit model. Leeg: het model van de app."
+        },
+        "wait": {
+          "name": "Wachten op resultaat",
+          "description": "Wacht tot de taak klaar is en geef het resultaat terug als response (gebruik response_variable)."
+        },
+        "timeout": {
+          "name": "Maximale wachttijd",
+          "description": "Hoe lang op het resultaat gewacht wordt."
+        }
+      }
+    }
   }
 }

@@ -41,6 +41,8 @@ Claude Code lives in an app because the regular terminal / code-server apps lose
 | `timeout_seconds` | `180` | Maximum time per request. |
 | `compact_hour` | `4` | Hour of the day (local time) at which the conversation is compacted with `/compact`. |
 | `followup_wait_seconds` | `240` | How long an Assist reply stays open for results of background work (0 = answer only; Home Assistant ends Assist runs from the app after 300 s). |
+| `task_max_minutes` | `30` | How long a task from an automation (`claude_code_agent.run_task`) may take, including its background work. |
+| `auto_update_claude` | `true` | Check daily (at `compact_hour`) for a new Claude Code version; rolls back if it does not start. |
 | `extra_instructions` | – | Appended to the system prompt. |
 
 ## Long tasks and follow-ups
@@ -88,6 +90,40 @@ The default instructions tell Claude to give automations that are only needed fo
 `compact_hour`, just before the conversation is compacted, the bridge deletes temporary automations whose time has
 passed (and fires a `claude_code_assist_cleanup` event). `POST /cleanup` runs it immediately.
 
+## Tasks from automations
+
+The integration adds the action **`claude_code_agent.run_task`**, so automations and scripts can give Claude Code a
+task:
+
+```yaml
+- action: claude_code_agent.run_task
+  data:
+    run_id: morning-report
+    prompt: >-
+      Check whether any window is open while the heating is on. If so, send a short notification
+      to notify.mobile_app_my_phone naming the windows.
+    model: opus        # optional: Claude Code does the work with an agent on this model
+    wait: true         # optional: wait for the result and return it as response
+  response_variable: report
+```
+
+- The task is a turn in the same conversation, marked as coming from an automation. It does not start a second Claude
+  Code process (which costs a few hundred MB of memory).
+- Nobody reads the reply unless the prompt says how to report (a notification, for example). Claude does not ask
+  questions in a task and skips anything that would need a confirmation.
+- Events: `claude_code_assist_task_started` (`run_id`) and `claude_code_assist_task_finished` (`run_id`, `success`,
+  `timed_out`, `result`, `duration_seconds`), after any background work the task started has finished (at most
+  `task_max_minutes`). Results that arrive later fire `claude_code_assist_task_late_result`.
+- With `wait: true` and a `response_variable`, the action returns the same data as the finished event.
+- The **Settings** tab lists recent runs with their task and result.
+
+## Claude Code updates
+
+Every day at `compact_hour` the app runs `claude update`. If a new version was installed, it checks that it starts
+(otherwise it switches back to the previous one), keeps only the current and the previous version, and restarts Claude
+Code as soon as no request or background work is running. **Update Claude Code now** in the Settings tab does the same
+right away; `auto_update_claude: false` turns the daily check off.
+
 ## Web UI
 
 Open the app (**Open Web UI**, or **Claude Code** in the sidebar for admins).
@@ -101,8 +137,10 @@ themselves.
 
 - edit the assistant's standing instructions (`CLAUDE.md`) in a full text editor — describe your home, preferences and
   rules; changes apply from the next message, the conversation itself is kept;
-- see the session status, model/effort and last compaction;
-- **Compact now** or **Start new conversation**.
+- see the session status, model/effort, Claude Code version and last compaction;
+- **Compact now**, **Start new conversation** or **Update Claude Code now**;
+- **Automation tasks**: recent runs of `claude_code_agent.run_task`;
+- **Session**: a read-only, live view of the raw Claude Code session (messages, tool calls and results).
 
 The default instructions are in `rootfs/defaults/CLAUDE.md`; by default the assistant always answers in the language of
 the message it receives. The web UI is only reachable through Home Assistant ingress (Supervisor proxy).
@@ -117,7 +155,7 @@ earlier questions and what it did. Each message carries a header with user, devi
 - Every day at `compact_hour` the conversation is compacted with `/compact` (Claude Code also auto-compacts when the
   context fills up).
 - Bridge endpoints (Bearer token required): `POST /conversation`, `POST /compact` (compact now),
-  `POST /reset` (start a new conversation), `POST /instructions`, `POST /cleanup`. `GET /health` shows the session id and last compaction.
+  `POST /reset` (start a new conversation), `POST /instructions`, `POST /cleanup`, `POST /task`, `POST /update`. `GET /health` shows the session id and last compaction.
 
 ## ⚠️ Security
 

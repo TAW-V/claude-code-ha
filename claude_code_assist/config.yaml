@@ -1,5 +1,5 @@
 name: Claude Code Assist
-version: "0.9.7"
+version: "0.10.0"
 slug: claude_code_assist
 description: Claude Code (your own subscription) as a Home Assistant conversation agent, with tool use
 url: "https://github.com/TAW-V/claude-code-ha"
@@ -35,6 +35,8 @@ options:
   timeout_seconds: 180
   compact_hour: 4
   followup_wait_seconds: 240
+  task_max_minutes: 30
+  auto_update_claude: true
   extra_instructions: ""
 schema:
   oauth_token: password
@@ -43,4 +45,6 @@ schema:
   timeout_seconds: int(30,600)
   compact_hour: int(0,23)
   followup_wait_seconds: int(0,290)
+  task_max_minutes: int(1,240)
+  auto_update_claude: bool
   extra_instructions: str?

@@ -4,13 +4,46 @@
       "user": {
         "title": "Claude Code Assist",
         "description": "Connect to the Claude Code Assist app. Leave the token empty to read it automatically from the app.",
-        "data": { "url": "Bridge URL", "token": "Bridge token (optional)" }
+        "data": {
+          "url": "Bridge URL",
+          "token": "Bridge token (optional)"
+        }
       }
     },
     "error": {
       "cannot_connect": "Cannot reach the Claude Code Assist app. Is it installed and running?",
       "no_token": "No token found. Start the Claude Code Assist app first."
     },
-    "abort": { "already_configured": "Already configured" }
+    "abort": {
+      "already_configured": "Already configured"
+    }
+  },
+  "services": {
+    "run_task": {
+      "name": "Run task",
+      "description": "Give Claude Code a task from an automation or script. It runs in the shared conversation; the result is fired as event claude_code_assist_task_finished and, with wait on, returned as response.",
+      "fields": {
+        "prompt": {
+          "name": "Task",
+          "description": "What Claude Code should do. No one reads the reply unless the task says how to report (for example a notification)."
+        },
+        "run_id": {
+          "name": "Run ID",
+          "description": "Name of this run, used in the events and the task list. Generated if empty."
+        },
+        "model": {
+          "name": "Model",
+          "description": "Model for the work, for example opus. Claude Code uses an agent with this model. Empty: the app's model."
+        },
+        "wait": {
+          "name": "Wait for the result",
+          "description": "Wait until the task is finished and return the result as response (use response_variable)."
+        },
+        "timeout": {
+          "name": "Maximum wait",
+          "description": "How long to wait for the result when waiting."
+        }
+      }
+    }
   }
 }

@@ -1,0 +1,32 @@
+run_task:
+  fields:
+    prompt:
+      required: true
+      example: "Check whether any window is open while the heating is on and tell me which ones."
+      selector:
+        text:
+          multiline: true
+    run_id:
+      example: "morning-report"
+      selector:
+        text:
+    model:
+      example: "opus"
+      selector:
+        select:
+          custom_value: true
+          options:
+            - "sonnet"
+            - "opus"
+            - "haiku"
+    wait:
+      default: false
+      selector:
+        boolean:
+    timeout:
+      default: 1800
+      selector:
+        number:
+          min: 10
+          max: 14400
+          unit_of_measurement: s

@@ -15,6 +15,8 @@ export CCA_EFFORT=$(jq -r '.effort // ""' "$OPTS")
 export CCA_TIMEOUT=$(jq -r '.timeout_seconds // 180' "$OPTS")
 export CCA_COMPACT_HOUR=$(jq -r '.compact_hour // 4' "$OPTS")
 export CCA_FOLLOWUP_WAIT=$(jq -r '.followup_wait_seconds // 240' "$OPTS")
+export CCA_AUTO_UPDATE=$(jq -r 'if .auto_update_claude == false then "false" else "true" end' "$OPTS")
+export CCA_TASK_MAX_MINUTES=$(jq -r '.task_max_minutes // 30' "$OPTS")
 export CCA_EXTRA=$(jq -r '.extra_instructions // ""' "$OPTS")
 
 # Install Claude Code once; it lives in /data so it survives restarts and updates.

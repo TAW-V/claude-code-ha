@@ -35,6 +35,8 @@ EFFORT = os.environ.get("CCA_EFFORT", "")
 COMPACT_HOUR = int(os.environ.get("CCA_COMPACT_HOUR", "4"))
 DEBUG = os.environ.get("CCA_DEBUG") == "1"
 FOLLOWUP_WAIT = int(os.environ.get("CCA_FOLLOWUP_WAIT", "240"))  # HA ends Assist runs from the app after 300 s
+AUTO_UPDATE = os.environ.get("CCA_AUTO_UPDATE", "true") == "true"
+TASK_MAX_MINUTES = int(os.environ.get("CCA_TASK_MAX_MINUTES", "30"))
 TOOLS = "Bash Read Edit Write Glob Grep WebFetch WebSearch TodoWrite Agent Monitor"
 HA_API = "http://supervisor/core/api"
 
@@ -203,6 +205,13 @@ def cleanup_temporary_automations() -> list:
 
 def deliver_followup(text: str, requester: dict) -> None:
     """Send a result that arrived after the Assist reply closed to the device that asked."""
+    if requester.get("task"):
+        log(f"late result for task {requester['task']}: {text[:100]!r}")
+        try:
+            ha_call("events/claude_code_assist_task_late_result", {"run_id": requester["task"], "result": text})
+        except Exception as err:  # noqa: BLE001
+            log(f"task event failed: {err}")
+        return
     text = to_speech(text)
     if not text:
         return
@@ -485,7 +494,7 @@ class ClaudeSession:
         if not text.strip():
             return
         for owner in owners:
-            if owner and (final or owner.get("panel")):
+            if owner and not owner.get("task") and (final or owner.get("panel")):
                 chat_add(owner.get("user"), "assistant", to_speech(text) if not owner.get("panel") else text, "result")
             if owner and owner.get("panel"):
                 continue  # the panel chat shows it from the history
@@ -727,11 +736,127 @@ def compact_scheduler() -> None:
             nxt += timedelta(days=1)
         time.sleep((nxt - now).total_seconds())
         try:
+            update_claude()
+        except Exception as err:  # noqa: BLE001
+            log(f"Claude Code update failed: {err}")
+        try:
             cleanup_temporary_automations()
         except Exception as err:  # noqa: BLE001
             log(f"temporary automation cleanup failed: {err}")
         if SESSION.state.get("session_id"):
             SESSION.compact()
+
+
+# ---------- Claude Code updates ----------
+def update_claude() -> None:
+    """Update the Claude Code binary; roll back if the new version does not start. Applied by a deferred restart."""
+    if not AUTO_UPDATE:
+        return
+    link = os.path.join(os.environ.get("HOME", "/data/home"), ".local", "bin", "claude")
+    if not os.path.islink(link):
+        log("Claude Code update skipped: not a native install")
+        return
+    old = os.path.realpath(link)
+    env = {k: v for k, v in os.environ.items() if k != "DISABLE_AUTOUPDATER"}
+    out = subprocess.run([link, "update"], env=env, capture_output=True, text=True, timeout=900)
+    new = os.path.realpath(link)
+    if new == old:
+        log(f"Claude Code is up to date ({os.path.basename(old)})" if out.returncode == 0
+            else f"Claude Code update failed: {(out.stderr or out.stdout).strip()[-300:]}")
+        return
+    try:
+        ok = subprocess.run([link, "--version"], env=env, capture_output=True, timeout=120).returncode == 0
+    except subprocess.TimeoutExpired:
+        ok = False
+    if not ok:
+        os.remove(link)
+        os.symlink(old, link)
+        subprocess.run(["rm", "-rf", new])
+        log(f"Claude Code {os.path.basename(new)} does not start; rolled back to {os.path.basename(old)}")
+        return
+    versions = os.path.dirname(new)
+    for name in os.listdir(versions):  # keep the new and the previous version (each is ~300 MB)
+        path = os.path.join(versions, name)
+        if path not in (new, old):
+            subprocess.run(["rm", "-rf", path])
+    log(f"Claude Code updated {os.path.basename(old)} -> {os.path.basename(new)}; restarting when idle")
+    SESSION.request_restart()
+
+
+# ---------- tasks from automations (action claude_code_agent.run_task) ----------
+TASKS_FILE = "/data/tasks.json"
+TASKS_KEEP = 50
+TASKS_LOCK = threading.Lock()
+TASKS_ACTIVE: dict = {}  # run_id -> started
+TASKS_MAX_QUEUED = 5
+
+
+def _tasks_save(entry: dict) -> None:
+    with TASKS_LOCK:
+        try:
+            with open(TASKS_FILE) as f:
+                runs = json.load(f)
+        except (OSError, ValueError):
+            runs = []
+        runs = [r for r in runs if r.get("run_id") != entry["run_id"] or r.get("started") != entry["started"]]
+        runs.append(entry)
+        with open(TASKS_FILE + ".tmp", "w") as f:
+            json.dump(runs[-TASKS_KEEP:], f)
+        os.replace(TASKS_FILE + ".tmp", TASKS_FILE)
+
+
+def tasks_recent() -> list:
+    with TASKS_LOCK:
+        try:
+            with open(TASKS_FILE) as f:
+                runs = list(reversed(json.load(f)))
+        except (OSError, ValueError):
+            return []
+    for run in runs:  # still marked running but not running any more: the app restarted during it
+        if run.get("state") == "running" and run.get("run_id") not in TASKS_ACTIVE:
+            run["state"] = "interrupted"
+    return runs
+
+
+def run_task(run_id: str, prompt: str, model: str) -> None:
+    """One task from an automation: a turn in the shared conversation, owned by the task. Its answer and the
+    results of background work it started are collected and fired as claude_code_assist_task_finished."""
+    owner = {"user": "automation", "device": f"task:{run_id}", "task": run_id, "followup": {}}
+    started = time.time()
+    entry = {"run_id": run_id, "started": datetime.now().isoformat(timespec="seconds"), "prompt": prompt[:2000],
+             "model": model or None, "state": "running"}
+    _tasks_save(entry)
+    try:
+        ha_call("events/claude_code_assist_task_started", {"run_id": run_id})
+    except Exception as err:  # noqa: BLE001
+        log(f"task event failed: {err}")
+    texts, success, timed_out = [], False, False
+    try:
+        header = (f"[Home Assistant automation task | run_id: {run_id} | time: {time.strftime('%Y-%m-%d %H:%M')}"
+                  + (f" | model: {model}" if model else "") + "]")
+        answer, success = SESSION.ask(f"{header}\n{prompt}", owner=owner)
+        texts.append(answer)
+        if success:
+            SESSION.follow(owner, lambda obj: obj.get("type") == "text" and texts.append(obj["text"]),
+                           max_wait=TASK_MAX_MINUTES * 60)
+            timed_out = time.time() - started >= TASK_MAX_MINUTES * 60
+    except Exception as err:  # noqa: BLE001
+        texts.append(f"Task failed: {err}")
+        success = False
+    finally:
+        TASKS_ACTIVE.pop(run_id, None)
+    result = "\n\n".join(t for t in texts if t and t.strip())
+    duration = round(time.time() - started)
+    entry.update(state="timed out" if timed_out else "done" if success else "failed", duration_seconds=duration,
+                 result=result[:4000])
+    _tasks_save(entry)
+    log(f"task {run_id} {entry['state']} in {duration}s: {result[:100]!r}")
+    try:
+        ha_call("events/claude_code_assist_task_finished",
+                {"run_id": run_id, "success": success and not timed_out, "timed_out": timed_out,
+                 "result": result, "duration_seconds": duration})
+    except Exception as err:  # noqa: BLE001
+        log(f"task event failed: {err}")
 
 
 # ---------- session view (Settings → Session in the web UI) ----------
@@ -863,6 +988,9 @@ def status() -> dict:
         "background_tasks": SESSION.task_summary(None) or None,
         "background_task_count": len(SESSION.running),
         "restart_pending": SESSION.restart_pending,
+        "claude_version": os.path.basename(os.path.realpath(os.path.join(
+            os.environ.get("HOME", "/data/home"), ".local", "bin", "claude"))),
+        "auto_update": AUTO_UPDATE,
     }
 
 
@@ -948,6 +1076,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(UI_HTML)))
             self.end_headers()
             self.wfile.write(UI_HTML)
+        elif self._from_ingress() and path == "/api/tasks":
+            self._reply(200, {"runs": tasks_recent()[:20]})
         elif self._from_ingress() and path == "/api/session":
             offset = re.search(r"offset=(\d+)", query)
             sid = re.search(r"sid=([\w-]+)", query)
@@ -1011,6 +1141,23 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/reset":
             restart_session(new_conversation=True)
             self._reply(200, {"ok": True})
+        elif path == "/task" and not self._from_ingress():
+            prompt = (req.get("prompt") or "").strip()
+            run_id = re.sub(r"[^\w.-]", "_", str(req.get("run_id") or "").strip())[:64] or time.strftime("task-%Y%m%d-%H%M%S")
+            if not prompt:
+                self._reply(400, {"error": "prompt is required"})
+            elif run_id in TASKS_ACTIVE:
+                self._reply(409, {"error": f"task {run_id} is already running"})
+            elif len(TASKS_ACTIVE) >= TASKS_MAX_QUEUED:
+                self._reply(429, {"error": "too many tasks waiting"})
+            else:
+                TASKS_ACTIVE[run_id] = time.time()
+                threading.Thread(target=run_task, args=(run_id, prompt, str(req.get("model") or "").strip()),
+                                 daemon=True).start()
+                self._reply(202, {"ok": True, "run_id": run_id})
+        elif path == "/update":
+            threading.Thread(target=update_claude, daemon=True).start()
+            self._reply(202, {"ok": True})
         elif path == "/conversation/stream" and not self._from_ingress():
             self._stream_conversation(req)
         elif path == "/conversation" and not self._from_ingress():
