@@ -1119,6 +1119,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/instructions":
             text = (req.get("text") or "").replace("\r\n", "\n")
+            with open(INSTRUCTIONS_FILE) as f:
+                current = f.read()
+            if req.get("base") is not None and req["base"].replace("\r\n", "\n") != current:
+                self._reply(409, {"error": "the instructions were changed elsewhere since you opened them; "
+                                           "copy your edits, press Discard changes and apply them again"})
+                return
             if not text.strip():
                 self._reply(400, {"error": "instructions cannot be empty"})
                 return

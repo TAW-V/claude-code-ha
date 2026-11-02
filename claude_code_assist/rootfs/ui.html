@@ -118,7 +118,7 @@
     <div class="row">
       <button class="primary" id="btnSave" disabled>Save</button>
       <button id="btnRevert" disabled>Discard changes</button>
-      <button id="btnDefault">Load default</button>
+      <button id="btnDefault">Load built-in default</button>
       <span class="msg" id="saveMsg"></span>
     </div>
   </section>
@@ -126,7 +126,7 @@
 </main>
 <script>
 const $ = id => document.getElementById(id);
-let saved = "";
+let saved = "", latest = "";
 
 async function api(path, body) {
   const opts = body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
@@ -152,20 +152,29 @@ async function refresh(loadText) {
   $("version").textContent = s.claude_version + (s.auto_update ? ` · checked daily at ${s.compact_hour}:00` : " · automatic updates off");
   $("pendingRow").hidden = !s.restart_pending;
   $("pendingMsg").textContent = `New instructions are saved but not active yet: Claude Code restarts when its ${s.background_task_count} background task(s) finish.`;
-  if (loadText) { saved = s.instructions; $("text").value = saved; dirty(); $("saveMsg").textContent = ""; }
+  const unchanged = $("text").value === saved;
+  if (loadText || (unchanged && s.instructions !== saved)) {
+    // Not being edited: always show the current file (it may have been changed elsewhere, e.g. by Claude).
+    saved = s.instructions; $("text").value = saved; dirty(); if (loadText) $("saveMsg").textContent = "";
+  } else if (s.instructions !== saved) {
+    $("saveMsg").textContent = "The instructions were changed elsewhere while you were editing. Discard changes loads the current version.";
+  }
+  latest = s.instructions;
 }
 
 $("text").addEventListener("input", dirty);
 $("btnSave").onclick = async () => {
   $("btnSave").disabled = true; $("saveMsg").textContent = "Saving…";
-  try { await api("instructions", { text: $("text").value }); saved = $("text").value; dirty();
+  try { await api("instructions", { text: $("text").value, base: saved }); saved = $("text").value; dirty();
         $("saveMsg").textContent = "Saved. Used from the next message once no background task is running."; refresh(false); }
   catch (e) { $("saveMsg").textContent = "Error: " + e.message; dirty(); }
 };
-$("btnRevert").onclick = () => { $("text").value = saved; dirty(); $("saveMsg").textContent = ""; };
+$("btnRevert").onclick = async () => { await refresh(false).catch(() => {}); saved = latest || saved; $("text").value = saved; dirty(); $("saveMsg").textContent = ""; };
 $("btnDefault").onclick = async () => {
+  if (!confirm("Replace the text in the editor with the app's built-in default instructions? Your own additions are not in it. Nothing is saved until you press Save; Discard changes brings your current instructions back.")) return;
   const d = await api("instructions/default", {});
-  $("text").value = d.instructions; dirty(); $("saveMsg").textContent = "Default loaded, not saved yet.";
+  $("text").value = d.instructions; dirty();
+  $("saveMsg").textContent = "Built-in default loaded, not saved. Saving replaces your instructions, including your own additions; Discard changes undoes this.";
 };
 $("btnCompact").onclick = async () => {
   await api("compact", {}); $("sessionMsg").textContent = "Compacting in the background…";
@@ -217,7 +226,7 @@ function show(tab) {
   if (chat) scrollDown();
 }
 $("tabChat").onclick = () => show("chat");
-$("tabSettings").onclick = () => show("settings");
+$("tabSettings").onclick = () => { show("settings"); refresh(false).catch(() => {}); };
 
 // ---------- chat ----------
 let lastId = 0, sending = false;
