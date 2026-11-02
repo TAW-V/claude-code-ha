@@ -14,6 +14,7 @@ user's mobile apps), else a persistent notification. Each also fires a `claude_c
 import json
 import os
 import re
+import socket
 import subprocess
 import threading
 import time
@@ -448,11 +449,13 @@ class ClaudeSession:
                 text = job["fallback"]
             self._route(text, [owner], final=True)
 
-    def follow(self, owner: dict, emit, max_wait: int = FOLLOWUP_WAIT) -> None:
+    def follow(self, owner: dict, emit, alive=lambda: True, max_wait: int = FOLLOWUP_WAIT) -> None:
         """After an answer: pass results that belong to this owner to emit() while their work is still going on.
 
         Stops when nothing of this owner is running, after max_wait seconds, when the same owner opens a new reply,
-        or when emit() raises (client gone). Later results become notifications/announcements.
+        or when the client is gone. A text is only emitted after alive() confirms the client is still connected (the
+        first write to a closed socket usually succeeds silently); texts that cannot be emitted become
+        notifications/announcements, like later results.
         """
         key = owner_key(owner)
         req = owner.get("req")
@@ -461,6 +464,7 @@ class ClaudeSession:
             self.listeners[key] = mine
         deadline = time.time() + max_wait
         had_work = False
+        undelivered: list = []
         try:
             while True:
                 with self.cond:
@@ -475,16 +479,25 @@ class ClaudeSession:
                                            timeout=8)
                     pending, mine[:] = list(mine), []
                     finished = self.listeners.get(key) is not mine or not active()
-                for text in pending:
-                    emit({"type": "text", "text": to_speech(text)})
+                for i, text in enumerate(pending):
+                    if not alive():
+                        undelivered.extend(pending[i:])
+                        return
+                    try:
+                        emit({"type": "text", "text": to_speech(text)})
+                    except OSError:
+                        undelivered.extend(pending[i:])
+                        raise
                 if finished or time.time() > deadline:
+                    return
+                if not alive():
                     return
                 emit({"type": "ping"})  # keeps the connection alive and detects a closed client
         finally:
             with self.cond:
                 if self.listeners.get(key) is mine:
                     del self.listeners[key]
-                leftover, mine[:] = list(mine), []
+                leftover, mine[:] = undelivered + list(mine), []
             for text in leftover:
                 threading.Thread(target=deliver_followup, args=(text, owner), daemon=True).start()
 
@@ -678,6 +691,15 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write((json.dumps(obj) + "\n").encode())
             self.wfile.flush()
 
+        def alive() -> bool:
+            """False once the client closed the connection (a closed peer reads as EOF)."""
+            try:
+                return self.connection.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT) != b""
+            except BlockingIOError:
+                return True  # nothing to read: still connected
+            except OSError:
+                return False
+
         owner = {"user": req.get("user"), "device": req.get("device"), "followup": req.get("followup") or {}}
         started = time.time()
         text, ok = SESSION.ask(f"{request_context(req, owner)}\n{req.get('text', '')}", owner=owner)
@@ -685,9 +707,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             emit({"type": "text", "text": to_speech(text) or "I did not get an answer."})
             if ok and req.get("follow", True):
-                SESSION.follow(owner, emit)
+                SESSION.follow(owner, emit, alive)
             emit({"type": "done"})
-        except (BrokenPipeError, ConnectionResetError):
+        except OSError:
             log("stream closed by client; further results become notifications")
 
 
