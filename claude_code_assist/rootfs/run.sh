@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/usr/bin/with-contenv bash
 # Claude Code Assist: installs Claude Code into persistent /data and runs the bridge.
 set -euo pipefail
 
@@ -11,6 +11,7 @@ mkdir -p "$HOME" /data/workspace
 TOKEN_OPT=$(jq -r '.oauth_token // ""' "$OPTS")
 if [ -n "$TOKEN_OPT" ]; then export CLAUDE_CODE_OAUTH_TOKEN="$TOKEN_OPT"; fi
 export CCA_MODEL=$(jq -r '.model // "sonnet"' "$OPTS")
+export CCA_EFFORT=$(jq -r '.effort // ""' "$OPTS")
 export CCA_TIMEOUT=$(jq -r '.timeout_seconds // 180' "$OPTS")
 export CCA_COMPACT_HOUR=$(jq -r '.compact_hour // 4' "$OPTS")
 export CCA_EXTRA=$(jq -r '.extra_instructions // ""' "$OPTS")

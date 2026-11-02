@@ -37,6 +37,7 @@ Claude Code lives in an app because the regular terminal / code-server apps lose
 |---|---|---|
 | `oauth_token` | – | Token from `claude setup-token` (valid ~1 year). |
 | `model` | `sonnet` | Claude Code model alias or ID (`haiku` is faster, `opus` smarter). |
+| `effort` | *(Claude Code default)* | Optional reasoning effort: `low`, `medium`, `high`, `xhigh`, `max`. Lower is faster. |
 | `timeout_seconds` | `180` | Maximum time per request. |
 | `compact_hour` | `4` | Hour of the day (local time) at which the conversation is compacted with `/compact`. |
 | `extra_instructions` | – | Appended to the system prompt. |

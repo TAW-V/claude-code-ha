@@ -22,6 +22,7 @@ TOKEN = open("/data/bridge_token").read().strip()
 MODEL = os.environ.get("CCA_MODEL", "sonnet")
 TIMEOUT = int(os.environ.get("CCA_TIMEOUT", "180"))
 EXTRA = os.environ.get("CCA_EXTRA", "")
+EFFORT = os.environ.get("CCA_EFFORT", "")
 COMPACT_HOUR = int(os.environ.get("CCA_COMPACT_HOUR", "4"))
 TOOLS = "Bash Read Edit Write Glob Grep WebFetch WebSearch TodoWrite"
 
@@ -72,6 +73,8 @@ class ClaudeSession:
             "--allowedTools", TOOLS,
             "--add-dir", "/config", "/addons", "/share",
         ]
+        if EFFORT:
+            cmd += ["--effort", EFFORT]
         if EXTRA:
             cmd += ["--append-system-prompt", EXTRA]
         if self.state.get("session_id"):
@@ -176,7 +179,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/health":
             self._reply(200, {
-                "ok": True, "model": MODEL,
+                "ok": True, "model": MODEL, "effort": EFFORT or "default",
                 "session_id": SESSION.state.get("session_id"),
                 "last_compact": SESSION.state.get("last_compact"),
                 "running": SESSION.proc is not None and SESSION.proc.poll() is None,
@@ -221,6 +224,6 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    log(f"bridge listening on :{PORT} model={MODEL} timeout={TIMEOUT}s compact_hour={COMPACT_HOUR}")
+    log(f"bridge listening on :{PORT} model={MODEL} effort={EFFORT or 'default'} timeout={TIMEOUT}s compact_hour={COMPACT_HOUR}")
     threading.Thread(target=compact_scheduler, daemon=True).start()
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
