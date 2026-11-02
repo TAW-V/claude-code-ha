@@ -99,20 +99,42 @@ def deliver_followup(text: str, requester: dict) -> None:
             log(f"follow-up via {path} failed: {err}")
 
 
+def owner_key(owner: dict | None) -> tuple | None:
+    """Follow-ups are routed per user and device, independent of which request is still open."""
+    return (owner.get("user"), owner.get("device")) if owner else None
+
+
+def owner_name(owner: dict | None) -> str:
+    return (owner or {}).get("user") or "unknown"
+
+
 class ClaudeSession:
-    """One persistent Claude Code process. A reader thread consumes its output continuously."""
+    """One persistent Claude Code process shared by all users.
+
+    A reader thread consumes the output continuously. Each request waits for the result of its own (replayed)
+    message. Background tasks are owned by whoever's turn started them; when they finish, Claude Code reports them
+    in a turn of its own (routed to the task's owner) or folds the notification into whatever turn is running. In
+    the latter case the bridge asks Claude separately to report the result to the owner (a "report job").
+    """
 
     def __init__(self) -> None:
-        self.lock = threading.Lock()  # one request at a time
+        self.lock = threading.Lock()  # one message to Claude Code at a time
         self.cond = threading.Condition()
         self.proc: subprocess.Popen | None = None
         self.state = load_state()
         self.busy = False  # Claude Code is in the middle of a turn
-        self.waiter: dict | None = None  # request waiting for its first result
-        self.requester: dict = {}  # who asked last; follow-ups are attributed to them
-        self.bg_tasks: list = []  # background tasks reported by Claude Code
-        self.listener: list | None = None  # open stream that wants follow-up results
+        self.waiter: dict | None = None  # request waiting for the result of its message
+        self.turn_owner: dict | None = None  # owner of the turn in progress (None: spontaneous/unknown)
+        self.tasks: dict = {}  # task_id -> {"owner", "root", "desc"}; kept, ids can notify more than once
+        self.running: set = set()  # root background tasks still running (from background_tasks_changed)
+        self.notified: list = []  # roots that notified since the last result, for the next spontaneous turn
+        self.folded: dict = {}  # root -> result text, notifications injected into the turn in progress
+        self.listeners: dict = {}  # owner key -> list of pending texts, for an open Assist reply
+        self.jobs: list = []  # report jobs: {"owner", "root", "fallback", "not_before", "if_notified"}
+        self.restart_pending = False
+        threading.Thread(target=self._job_worker, daemon=True).start()
 
+    # ---------- process ----------
     def _start(self) -> None:
         cmd = [
             "claude", "-p",
@@ -134,9 +156,42 @@ class ClaudeSession:
             cmd, cwd=WORKSPACE, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, bufsize=1,
         )
-        self.busy = False
+        with self.cond:
+            self.busy = False
         threading.Thread(target=self._read, args=(self.proc,), daemon=True).start()
         threading.Thread(target=self._drain_stderr, args=(self.proc.stderr,), daemon=True).start()
+
+    @staticmethod
+    def _drain_stderr(stream) -> None:
+        for line in stream:
+            log(f"stderr: {line.rstrip()[:300]}")
+
+    def _kill(self, reason: str = "") -> None:
+        """Stop the process. Owners of background tasks that were still running are told they were interrupted."""
+        if self.proc and self.proc.poll() is None:
+            self.proc.kill()
+            self.proc.wait(timeout=10)
+        self.proc = None
+        with self.cond:
+            roots = {self._root(r) for r in self.running if r in self.tasks}
+            interrupted = [self.tasks[r] for r in roots if r in self.tasks]
+            self.busy = False
+            self.waiter = None
+            self.turn_owner = None
+            self.tasks, self.running, self.notified, self.folded, self.jobs = {}, set(), [], {}, []
+            self.cond.notify_all()
+        for task in interrupted:
+            self._route(f'Your background task "{task["desc"]}" was interrupted because Claude Code was restarted'
+                        f'{" (" + reason + ")" if reason else ""}. Please ask again if you still need it.',
+                        [task["owner"]], final=True)
+
+    # ---------- reading ----------
+    def _root(self, task_id: str) -> str:
+        seen = set()
+        while task_id in self.tasks and self.tasks[task_id]["root"] != task_id and task_id not in seen:
+            seen.add(task_id)
+            task_id = self.tasks[task_id]["root"]
+        return task_id
 
     def _read(self, proc: subprocess.Popen) -> None:
         for line in proc.stdout:
@@ -144,19 +199,23 @@ class ClaudeSession:
                 event = json.loads(line)
             except ValueError:
                 continue
-            kind = event.get("type")
-            if kind == "system" and event.get("subtype") == "init":
-                with self.cond:
+            kind, sub = event.get("type"), event.get("subtype")
+            with self.cond:
+                if kind == "system" and sub == "init":
                     self.busy = True
-            elif kind == "user" and event.get("isReplay"):
-                with self.cond:
-                    if self.waiter and event.get("uuid") == self.waiter["uuid"]:
-                        self.waiter["acked"] = True
-            elif kind == "system" and event.get("subtype") == "background_tasks_changed":
-                with self.cond:
-                    self.bg_tasks = event.get("tasks") or []
-                    self.cond.notify_all()
-            elif kind == "result":
+                elif kind == "user" and event.get("isReplay"):
+                    self._on_replay(event)
+                elif kind == "system" and sub == "task_started":
+                    self._on_task_started(event)
+                elif kind == "system" and sub == "task_notification":
+                    root = self._root(event.get("task_id", ""))
+                    if root in self.tasks and root not in self.notified:
+                        self.notified.append(root)
+                elif kind == "system" and sub == "background_tasks_changed":
+                    ids = {t.get("task_id") for t in event.get("tasks") or []}
+                    self.running = {self._root(i) for i in ids}  # a subagent's own tasks count as its root task
+                self.cond.notify_all()
+            if kind == "result":
                 self._on_result(event)
         with self.cond:  # process ended
             self.busy = False
@@ -165,101 +224,221 @@ class ClaudeSession:
                 self.waiter["done"].set()
             self.cond.notify_all()
 
+    def _on_replay(self, event: dict) -> None:
+        if self.waiter and event.get("uuid") == self.waiter["uuid"]:
+            self.waiter["acked"] = True
+            self.turn_owner = self.waiter["owner"]
+            return
+        if (event.get("origin") or {}).get("kind") == "task-notification":
+            content = event.get("message", {}).get("content")
+            if not isinstance(content, str):
+                content = " ".join(c.get("text", "") for c in content or [] if isinstance(c, dict))
+            m = re.search(r"<task-id>([^<]+)</task-id>", content)
+            if m:
+                root = self._root(m.group(1).strip())
+                r = re.search(r"<result>(.*?)</result>", content, flags=re.S)
+                self.folded[root] = r.group(1).strip() if r else ""
+
+    def _on_task_started(self, event: dict) -> None:
+        task_id, parent = event.get("task_id"), event.get("parent_task_id")
+        if not task_id:
+            return
+        if parent:
+            root = self._root(parent)
+            owner = self.tasks.get(root, {}).get("owner")
+        elif event.get("is_backgrounded"):
+            root = task_id
+            owner = self.turn_owner
+            if owner is None and self.notified:  # a spontaneous turn: it acts for whoever's task woke it up
+                owner = self.tasks.get(self.notified[0], {}).get("owner")
+        else:
+            return  # foreground tool call inside a turn
+        self.tasks[task_id] = {"owner": owner, "root": root, "desc": event.get("description") or "background task"}
+
     def _on_result(self, event: dict) -> None:
         if event.get("session_id") and event["session_id"] != self.state.get("session_id"):
             self.state["session_id"] = event["session_id"]
             save_state(self.state)
         text, ok = event.get("result") or "", not event.get("is_error")
+        routes: list = []
         with self.cond:
             self.busy = False
-            # Only a result that comes after our message was picked up answers it; anything earlier is a turn
-            # Claude Code ran on its own (e.g. a background task that finished) and is treated as a follow-up.
             waiter = self.waiter if self.waiter and self.waiter["acked"] else None
+            turn_owner = self.turn_owner
+            folded, self.folded = self.folded, {}
+            self.turn_owner = None
             if waiter:
                 self.waiter = None
-            listener = self.listener if not waiter else None
-            if waiter:
                 waiter["result"] = (text, ok)
                 waiter["done"].set()
-            elif listener is not None:
-                listener.append(text)
+                # Someone else spoke while these tasks ran: Claude's own report turn may address the wrong person.
+                for root in self.running:
+                    task = self.tasks.get(root)
+                    if task and owner_key(task["owner"]) != owner_key(turn_owner):
+                        task["interleaved"] = True
+            else:
+                # Spontaneous turn: it reports the tasks that notified since the last result. If another user asked
+                # something while a task ran, its text is not trusted for that owner; the bridge asks explicitly.
+                roots, self.notified = self.notified, []
+                owners = {}
+                for root in roots:
+                    task = self.tasks.get(root, {})
+                    finished = root not in self.running
+                    if task.get("interleaved"):
+                        if finished:
+                            self.jobs.append({"owner": task.get("owner"), "root": root, "fallback": text,
+                                              "not_before": 0, "if_notified": False})
+                        continue
+                    owners[owner_key(task.get("owner"))] = (task.get("owner"), finished)
+                if text.strip() and (owners or not roots):
+                    final = any(f for _, f in owners.values()) if owners else True
+                    routes.append((text, [o for o, _ in owners.values()] or [None], final))
+            # Notifications folded into this turn: the owner gets a separate report, unless it was their turn.
+            for root, fallback in folded.items():
+                if root in self.notified:
+                    self.notified.remove(root)
+                owner = self.tasks.get(root, {}).get("owner")
+                if waiter and owner_key(owner) == owner_key(turn_owner):
+                    continue
+                self.jobs.append({"owner": owner, "root": root, "fallback": fallback,
+                                  "not_before": 0, "if_notified": False})
+            # Notified during a user's turn but not folded: normally Claude Code reports it in a turn of its own
+            # right after. If that does not happen within a few seconds, ask for the report.
+            if waiter:
+                for root in self.notified:
+                    self.jobs.append({"owner": self.tasks.get(root, {}).get("owner"), "root": root,
+                                      "fallback": "", "not_before": time.time() + 10, "if_notified": True})
             self.cond.notify_all()
-        if not waiter and listener is None and text.strip():
-            threading.Thread(target=deliver_followup, args=(text, dict(self.requester)), daemon=True).start()
+        for text_, owners_, final_ in routes:
+            self._route(text_, owners_, final_)
+        self._maybe_restart()
 
-    @staticmethod
-    def _drain_stderr(stream) -> None:
-        for line in stream:
-            log(f"stderr: {line.rstrip()[:300]}")
+    # ---------- routing ----------
+    def _route(self, text: str, owners: list, final: bool) -> None:
+        """Into the owner's open Assist reply if there is one; otherwise, if final, a notification/announcement."""
+        if not text.strip():
+            return
+        for owner in owners:
+            with self.cond:
+                listener = self.listeners.get(owner_key(owner))
+                if listener is not None:
+                    listener.append(text)
+                    self.cond.notify_all()
+                    continue
+            if final:
+                threading.Thread(target=deliver_followup, args=(text, owner or {}), daemon=True).start()
+            else:
+                log(f"interim update for {owner_name(owner)} dropped (no open reply): {text[:80]!r}")
 
-    def _kill(self) -> None:
-        if self.proc and self.proc.poll() is None:
-            self.proc.kill()
-            self.proc.wait(timeout=10)
-        self.proc = None
+    def _owner_active(self, key: tuple) -> bool:
+        """Is anything still going on whose result belongs to this owner?"""
+        if any(owner_key(self.tasks.get(r, {}).get("owner")) == key for r in self.running):
+            return True
+        if any(owner_key(j["owner"]) == key for j in self.jobs):
+            return True
+        if any(owner_key(self.tasks.get(r, {}).get("owner")) == key for r in self.notified):
+            return True
+        return self.busy and owner_key(self.turn_owner) == key
+
+    def task_summary(self, for_owner: dict | None) -> str:
         with self.cond:
-            self.busy = False
-            self.waiter = None
-            self.bg_tasks = []
-            self.cond.notify_all()
+            items = []
+            for root in sorted(self.running):
+                task = self.tasks.get(root)
+                if task:
+                    who = owner_name(task["owner"])
+                    if owner_key(task["owner"]) == owner_key(for_owner):
+                        who += ", the current user"
+                    items.append(f'"{task["desc"]}" (started by {who})')
+        return "; ".join(items)
 
-    def ask(self, text: str, timeout: int = TIMEOUT, requester: dict | None = None) -> tuple[str, bool]:
-        """Send one message and wait for its first result. Returns (text, ok)."""
+    # ---------- asking ----------
+    def ask(self, text: str, timeout: int = TIMEOUT, owner: dict | None = None) -> tuple[str, bool]:
+        """Send one message and wait for the result of its turn. Returns (text, ok)."""
         with self.lock:
             for attempt in (1, 2):
                 if self.proc is None or self.proc.poll() is not None:
                     self._start()
-                self.end_stream()  # a new question ends waiting for the previous one's follow-ups
-                with self.cond:  # let a turn Claude Code started on its own finish first (it becomes a follow-up)
+                with self.cond:  # let a turn Claude Code started on its own finish first
                     self.cond.wait_for(lambda: not self.busy, timeout=timeout)
                     waiter = {"done": threading.Event(), "result": None, "dead": False,
-                              "uuid": str(uuid.uuid4()), "acked": False}
+                              "uuid": str(uuid.uuid4()), "acked": False, "owner": owner}
                     self.waiter = waiter
-                if requester is not None:
-                    self.requester = requester
                 msg = {"type": "user", "uuid": waiter["uuid"],
                        "message": {"role": "user", "content": [{"type": "text", "text": text}]}}
                 try:
                     self.proc.stdin.write(json.dumps(msg) + "\n")
                     self.proc.stdin.flush()
                 except (BrokenPipeError, OSError):
-                    self._kill()
+                    self._kill("it stopped responding")
                     continue
                 if not waiter["done"].wait(timeout):
                     log(f"timeout after {timeout}s, restarting session")
-                    self._kill()
+                    self._kill("a request timed out")
                     return "That took too long, so I stopped. Please try again or ask something shorter.", False
                 if waiter["dead"]:  # process died; resume it and retry once
                     log("Claude Code exited, resuming")
-                    self._kill()
+                    self._kill("it exited unexpectedly")
                     continue
                 return waiter["result"]
             return "Claude Code is not responding. Check the log of the Claude Code Assist app.", False
 
-    def follow(self, emit, max_wait: int = FOLLOWUP_WAIT) -> None:
-        """After an answer: pass later results to emit() while Claude Code is still working.
+    def _job_worker(self) -> None:
+        """Ask Claude to report background results that ended up in someone else's turn."""
+        while True:
+            with self.cond:
+                self.cond.wait_for(lambda: any(j["not_before"] <= time.time() for j in self.jobs), timeout=2)
+                due = [j for j in self.jobs if j["not_before"] <= time.time()]
+                if not due:
+                    continue
+                job = due[0]
+                self.jobs.remove(job)
+                if job["if_notified"]:
+                    if job["root"] not in self.notified:
+                        continue  # a spontaneous turn reported it in the meantime
+                    self.notified.remove(job["root"])
+                task = self.tasks.get(job["root"], {})
+            owner = job["owner"]
+            who = owner_name(owner)
+            prompt = (
+                f"[Claude Code Assist bridge | report for: {who} | device: {(owner or {}).get('device') or 'unknown'}"
+                f" | time: {time.strftime('%Y-%m-%d %H:%M')}]\n"
+                f'The background task "{task.get("desc", "background task")}" that {who} started has finished. '
+                f"Report its outcome to {who} now in one short message, in the language {who} used when asking. "
+                f"This message is delivered only to {who}."
+            )
+            log(f"report job for {who}: {task.get('desc')!r}")
+            text, ok = self.ask(prompt, owner=owner)
+            if not ok or not text.strip():
+                text = job["fallback"]
+            self._route(text, [owner], final=True)
 
-        Stops when no turn and no background task is running, after max_wait seconds, when a new question arrives,
-        or when emit() raises (client gone). Results after that become notifications.
+    def follow(self, owner: dict, emit, max_wait: int = FOLLOWUP_WAIT) -> None:
+        """After an answer: pass results that belong to this owner to emit() while their work is still going on.
+
+        Stops when nothing of this owner is running, after max_wait seconds, when the same owner opens a new reply,
+        or when emit() raises (client gone). Later results become notifications/announcements.
         """
+        key = owner_key(owner)
         mine: list = []
         with self.cond:
-            self.listener = mine
+            self.listeners[key] = mine
         deadline = time.time() + max_wait
-        had_bg = False  # only wait for a closing turn if background work was running
+        had_work = False
         try:
             while True:
                 with self.cond:
-                    had_bg = had_bg or bool(self.bg_tasks)
-                    self.cond.wait_for(lambda: mine or self.listener is not mine
-                                       or not (self.busy or self.bg_tasks), timeout=15)
-                    had_bg = had_bg or bool(self.bg_tasks)
-                    if had_bg and not mine and self.listener is mine and not (self.busy or self.bg_tasks):
-                        # A finished background task is followed by a new turn a moment later; give it time to start.
-                        self.cond.wait_for(lambda: mine or self.listener is not mine or self.busy or self.bg_tasks,
+                    active = lambda: self._owner_active(key)  # noqa: E731
+                    had_work = had_work or active()
+                    self.cond.wait_for(lambda: mine or self.listeners.get(key) is not mine or not active(),
+                                       timeout=15)
+                    had_work = had_work or active()
+                    if had_work and not mine and self.listeners.get(key) is mine and not active():
+                        # A finished task is followed by a reporting turn a moment later; give it time to start.
+                        self.cond.wait_for(lambda: mine or self.listeners.get(key) is not mine or active(),
                                            timeout=8)
                     pending, mine[:] = list(mine), []
-                    finished = self.listener is not mine or not (self.busy or self.bg_tasks)
+                    finished = self.listeners.get(key) is not mine or not active()
                 for text in pending:
                     emit({"type": "text", "text": to_speech(text)})
                 if finished or time.time() > deadline:
@@ -267,23 +446,37 @@ class ClaudeSession:
                 emit({"type": "ping"})  # keeps the connection alive and detects a closed client
         finally:
             with self.cond:
-                if self.listener is mine:
-                    self.listener = None
+                if self.listeners.get(key) is mine:
+                    del self.listeners[key]
                 leftover, mine[:] = list(mine), []
             for text in leftover:
-                threading.Thread(target=deliver_followup, args=(text, dict(self.requester)), daemon=True).start()
+                threading.Thread(target=deliver_followup, args=(text, owner), daemon=True).start()
 
-    def end_stream(self) -> None:
+    # ---------- maintenance ----------
+    def request_restart(self) -> None:
+        """Restart to reload instructions, as soon as no turn and no background task is running."""
         with self.cond:
-            self.listener = None
-            self.cond.notify_all()
+            self.restart_pending = True
+        self._maybe_restart()
+
+    def _maybe_restart(self) -> None:
+        with self.cond:
+            if not self.restart_pending or self.busy or self.running or self.waiter or self.jobs or self.notified:
+                return
+            self.restart_pending = False
+        threading.Thread(target=self._restart_now, daemon=True).start()
+
+    def _restart_now(self) -> None:
+        with self.lock:
+            self._kill()
+        log("session restarted, instructions reloaded on next message")
 
     def compact(self) -> None:
         started = time.time()
         _, ok = self.ask("/compact", timeout=600)
         self.state["last_compact"] = datetime.now().isoformat(timespec="seconds")
         save_state(self.state)
-        log(f"daily /compact done in {time.time() - started:.0f}s ok={ok}")
+        log(f"/compact done in {time.time() - started:.0f}s ok={ok}")
 
 
 SESSION = ClaudeSession()
@@ -306,14 +499,16 @@ UI_HTML = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui.html
 
 
 def restart_session(new_conversation: bool = False) -> None:
-    """Stop the Claude Code process; the next message starts it again (resumed unless new_conversation)."""
+    """Instructions changed: restart once idle. New conversation: stop now (running tasks are reported)."""
+    if not new_conversation:
+        SESSION.request_restart()
+        log("instructions saved, Claude Code restarts once it is idle")
+        return
     with SESSION.lock:
-        SESSION._kill()
-        if new_conversation:
-            SESSION.state.pop("session_id", None)
-            save_state(SESSION.state)
-    log("session reset, next message starts a new conversation" if new_conversation
-        else "session restarted, instructions reloaded on next message")
+        SESSION._kill("a new conversation was started")
+        SESSION.state.pop("session_id", None)
+        save_state(SESSION.state)
+    log("session reset, next message starts a new conversation")
 
 
 def status() -> dict:
@@ -323,7 +518,20 @@ def status() -> dict:
         "last_compact": SESSION.state.get("last_compact"),
         "compact_hour": COMPACT_HOUR,
         "running": SESSION.proc is not None and SESSION.proc.poll() is None,
+        "background_tasks": SESSION.task_summary(None) or None,
+        "restart_pending": SESSION.restart_pending,
     }
+
+
+def request_context(req: dict, owner: dict) -> str:
+    tasks = SESSION.task_summary(owner)
+    return (
+        f"[Home Assistant Assist | user: {req.get('user') or 'unknown'}"
+        f" | device: {req.get('device') or 'unknown'} | language: {req.get('language') or 'unknown'}"
+        f" | time: {time.strftime('%Y-%m-%d %H:%M')}"
+        + (f" | running background tasks: {tasks}" if tasks else "")
+        + "]"
+    )
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -403,14 +611,9 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/conversation/stream" and not self._from_ingress():
             self._stream_conversation(req)
         elif path == "/conversation" and not self._from_ingress():
-            context = (
-                f"[Home Assistant Assist | user: {req.get('user') or 'unknown'}"
-                f" | device: {req.get('device') or 'unknown'} | language: {req.get('language') or 'unknown'}"
-                f" | time: {time.strftime('%Y-%m-%d %H:%M')}]"
-            )
+            owner = {"user": req.get("user"), "device": req.get("device"), "followup": req.get("followup") or {}}
             started = time.time()
-            requester = {"user": req.get("user"), "device": req.get("device"), "followup": req.get("followup") or {}}
-            text, ok = SESSION.ask(f"{context}\n{req.get('text', '')}", requester=requester)
+            text, ok = SESSION.ask(f"{request_context(req, owner)}\n{req.get('text', '')}", owner=owner)
             log(f"{time.time() - started:.1f}s ok={ok} q={req.get('text', '')[:80]!r}")
             self._reply(200, {"speech": to_speech(text) or "I did not get an answer.",
                               "conversation_id": req.get("conversation_id")})
@@ -429,19 +632,14 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write((json.dumps(obj) + "\n").encode())
             self.wfile.flush()
 
-        context = (
-            f"[Home Assistant Assist | user: {req.get('user') or 'unknown'}"
-            f" | device: {req.get('device') or 'unknown'} | language: {req.get('language') or 'unknown'}"
-            f" | time: {time.strftime('%Y-%m-%d %H:%M')}]"
-        )
-        requester = {"user": req.get("user"), "device": req.get("device"), "followup": req.get("followup") or {}}
+        owner = {"user": req.get("user"), "device": req.get("device"), "followup": req.get("followup") or {}}
         started = time.time()
-        text, ok = SESSION.ask(f"{context}\n{req.get('text', '')}", requester=requester)
+        text, ok = SESSION.ask(f"{request_context(req, owner)}\n{req.get('text', '')}", owner=owner)
         log(f"{time.time() - started:.1f}s ok={ok} device={req.get('device')!r} q={req.get('text', '')[:80]!r}")
         try:
             emit({"type": "text", "text": to_speech(text) or "I did not get an answer."})
             if ok and req.get("follow", True):
-                SESSION.follow(emit)
+                SESSION.follow(owner, emit)
             emit({"type": "done"})
         except (BrokenPipeError, ConnectionResetError):
             log("stream closed by client; further results become notifications")

@@ -56,7 +56,23 @@ that…") and keeps working in the background. The result goes back to **the dev
 | Unknown | Persistent notification in Home Assistant. |
 
 Every follow-up also fires a `claude_code_assist_followup` event (`text`, `user`, `device`) for your own automations.
-The bridge uses `--replay-user-messages` to match each result to the question it answers.
+
+### Several users at once
+
+Everyone shares one conversation, but **background results belong to whoever started the task**:
+
+- The bridge runs Claude Code with `--replay-user-messages`, so it knows which result answers which question, and it
+  records the owner of every background task (`task_started`) and when it finishes (`task_notification`).
+- Another user can ask questions while your agent runs; they get their own answer and their reply closes normally.
+- If Claude folds a finished task into someone else's turn, or someone else spoke while the task ran, the bridge
+  asks Claude separately to report the result to the task's owner. The header of every message lists the running
+  background tasks and who started them, and the default instructions tell Claude not to mention other people's
+  results.
+- Saving instructions waits until no background task is running before restarting Claude Code; *Start new
+  conversation* stops immediately and tells owners of running tasks that they were interrupted.
+
+Best effort: a folded answer can still occasionally mention someone else's result, and progress messages are only
+shown in an open chat (never pushed or announced).
 
 ## Web UI
 

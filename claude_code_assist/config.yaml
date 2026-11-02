@@ -1,5 +1,5 @@
 name: Claude Code Assist
-version: "0.6.1"
+version: "0.7.0"
 slug: claude_code_assist
 description: Claude Code (your own subscription) as a Home Assistant conversation agent, with tool use
 url: https://github.com/TAW-V/claude-code-ha
