@@ -1,5 +1,7 @@
 """Conversation entity that forwards Assist requests to Claude Code."""
 
+import json
+from collections.abc import AsyncGenerator
 from typing import Literal
 
 import aiohttp
@@ -12,7 +14,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .const import CONF_TOKEN, CONF_URL, DOMAIN, REQUEST_TIMEOUT
+from .const import CONF_TOKEN, CONF_URL, DOMAIN
 
 
 async def async_setup_entry(
@@ -25,6 +27,7 @@ class ClaudeCodeConversationEntity(conversation.ConversationEntity, conversation
     _attr_has_entity_name = True
     _attr_name = None
     _attr_supported_features = conversation.ConversationEntityFeature.CONTROL
+    _attr_supports_streaming = True
 
     def __init__(self, entry: ConfigEntry) -> None:
         self.entry = entry
@@ -60,20 +63,33 @@ class ClaudeCodeConversationEntity(conversation.ConversationEntity, conversation
             "user": user_name,
             "device": device_name,
         }
+        async for _content in chat_log.async_add_delta_content_stream(self.entity_id, self._stream(payload)):
+            pass
+        return conversation.async_get_result_from_chat_log(user_input, chat_log)
+
+    async def _stream(self, payload: dict) -> AsyncGenerator[conversation.AssistantContentDeltaDict]:
+        """Answer first, then follow-up results while Claude Code keeps working, all in one message."""
+        yield {"role": "assistant"}
+        sent = False
         try:
             session = async_get_clientsession(self.hass)
             async with session.post(
-                f"{self.entry.data[CONF_URL]}/conversation",
+                f"{self.entry.data[CONF_URL]}/conversation/stream",
                 json=payload,
                 headers={"Authorization": f"Bearer {self.entry.data[CONF_TOKEN]}"},
-                timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
+                # the bridge sends a line at least every 15 s while background work runs
+                timeout=aiohttp.ClientTimeout(total=None, sock_connect=10, sock_read=660),
             ) as resp:
                 resp.raise_for_status()
-                speech = (await resp.json())["speech"]
-        except (aiohttp.ClientError, TimeoutError, KeyError, ValueError) as err:
-            speech = f"Claude Code is not reachable ({type(err).__name__})."
-
-        chat_log.async_add_assistant_content_without_tools(
-            conversation.AssistantContent(agent_id=self.entity_id, content=speech)
-        )
-        return conversation.async_get_result_from_chat_log(user_input, chat_log)
+                async for raw in resp.content:
+                    if not raw.strip():
+                        continue
+                    msg = json.loads(raw)
+                    if msg.get("type") == "text" and msg.get("text"):
+                        yield {"content": ("\n\n" if sent else "") + msg["text"]}
+                        sent = True
+                    elif msg.get("type") == "done":
+                        break
+        except (aiohttp.ClientError, TimeoutError, ValueError) as err:
+            if not sent:
+                yield {"content": f"Claude Code is not reachable ({type(err).__name__})."}

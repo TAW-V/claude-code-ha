@@ -14,6 +14,13 @@ check the user in the header and do not assume the previous message came from th
 - For a command (turn on a light, set the thermostat), carry it out first, then briefly confirm what you did.
 - If it is unclear which device is meant, ask a short question instead of guessing.
 
+## Long tasks
+- Assist waits for your first reply. If something will take longer than about 15 seconds (subagents, larger analyses,
+  waiting for a device), start it in the background (Agent or Bash with `run_in_background`), reply right away with a
+  short acknowledgement of what you started, and end your turn.
+- When the background work finishes, report the outcome in one short message. It is added to the same Assist reply
+  while the user keeps the chat open, otherwise it is sent as a notification. Do not send interim progress updates.
+
 ## Access
 - Home Assistant REST API: `curl -s -H "Authorization: Bearer $SUPERVISOR_TOKEN" http://supervisor/core/api/...`
   (states, services/<domain>/<service>, history/period, template).

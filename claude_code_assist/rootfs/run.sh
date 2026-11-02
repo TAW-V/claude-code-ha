@@ -14,6 +14,8 @@ export CCA_MODEL=$(jq -r '.model // "sonnet"' "$OPTS")
 export CCA_EFFORT=$(jq -r '.effort // ""' "$OPTS")
 export CCA_TIMEOUT=$(jq -r '.timeout_seconds // 180' "$OPTS")
 export CCA_COMPACT_HOUR=$(jq -r '.compact_hour // 4' "$OPTS")
+export CCA_FOLLOWUP_WAIT=$(jq -r '.followup_wait_seconds // 600' "$OPTS")
+export CCA_FOLLOWUP_NOTIFY=$(jq -r '.followup_notify // ""' "$OPTS")
 export CCA_EXTRA=$(jq -r '.extra_instructions // ""' "$OPTS")
 
 # Install Claude Code once; it lives in /data so it survives restarts and updates.

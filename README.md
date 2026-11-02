@@ -40,7 +40,20 @@ Claude Code lives in an app because the regular terminal / code-server apps lose
 | `effort` | *(Claude Code default)* | Optional reasoning effort: `low`, `medium`, `high`, `xhigh`, `max`. Lower is faster. |
 | `timeout_seconds` | `180` | Maximum time per request. |
 | `compact_hour` | `4` | Hour of the day (local time) at which the conversation is compacted with `/compact`. |
+| `followup_wait_seconds` | `600` | How long an Assist reply stays open for results of background work (0 = answer only). |
+| `followup_notify` | – | Comma-separated notify services (e.g. `notify.mobile_app_my_phone`) that also receive follow-ups. |
 | `extra_instructions` | – | Appended to the system prompt. |
+
+## Long tasks and follow-ups
+
+For work that takes a while (subagents, larger analyses) the assistant answers right away ("I started an agent
+that…") and keeps working in the background. The integration streams the reply, so the result appears in the **same
+Assist chat** as soon as it is ready — the reply stays open while background work runs, up to `followup_wait_seconds`.
+
+Results that arrive after that (or when a new question was asked in the meantime) are sent as a Home Assistant
+notification, or to the `followup_notify` services. Every follow-up also fires a `claude_code_assist_followup` event
+(`text`, `user`, `device`) that you can use in automations, e.g. to announce it on a speaker. Because Home Assistant
+keeps the reply open even if you close the chat, set `followup_notify` to your phone if you don't want to miss results.
 
 ## Web UI
 
