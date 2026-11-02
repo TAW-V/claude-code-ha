@@ -12,6 +12,7 @@ TOKEN_OPT=$(jq -r '.oauth_token // ""' "$OPTS")
 if [ -n "$TOKEN_OPT" ]; then export CLAUDE_CODE_OAUTH_TOKEN="$TOKEN_OPT"; fi
 export CCA_MODEL=$(jq -r '.model // "sonnet"' "$OPTS")
 export CCA_TIMEOUT=$(jq -r '.timeout_seconds // 180' "$OPTS")
+export CCA_COMPACT_HOUR=$(jq -r '.compact_hour // 4' "$OPTS")
 export CCA_EXTRA=$(jq -r '.extra_instructions // ""' "$OPTS")
 
 # Install Claude Code once; it lives in /data so it survives restarts and updates.
@@ -27,8 +28,13 @@ if [ ! -s /data/bridge_token ]; then
 fi
 install -m 600 /data/bridge_token /config/.claude_code_assist_token
 
-# Default instructions for the assistant (kept if you edit them).
-if [ ! -f /data/workspace/CLAUDE.md ]; then cp /defaults/CLAUDE.md /data/workspace/CLAUDE.md; fi
+# Default instructions for the assistant. Updated with new app versions unless you edited them.
+WS=/data/workspace
+if [ ! -f "$WS/CLAUDE.md" ] || { [ -f "$WS/.CLAUDE.md.default" ] && cmp -s "$WS/CLAUDE.md" "$WS/.CLAUDE.md.default"; } \
+   || [ ! -f "$WS/.CLAUDE.md.default" ]; then
+  cp /defaults/CLAUDE.md "$WS/CLAUDE.md"
+fi
+cp /defaults/CLAUDE.md "$WS/.CLAUDE.md.default"
 
 if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && [ ! -f "$HOME/.claude/.credentials.json" ]; then
   echo "[cca] WARNING: no oauth_token set. Run 'claude setup-token' and paste the token in the app options."

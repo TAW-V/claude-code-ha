@@ -9,7 +9,7 @@ It consists of two parts in this repository:
 
 | Part | Path | What it does |
 |---|---|---|
-| **App** (add-on) *Claude Code Assist* | `claude_code_assist/` | Installs Claude Code into the app's persistent `/data`, runs a small HTTP bridge on the internal Supervisor network (port 8099) that forwards each request to `claude -p`. |
+| **App** (add-on) *Claude Code Assist* | `claude_code_assist/` | Installs Claude Code into the app's persistent `/data` and keeps **one long-running Claude Code session** (`claude -p --input-format stream-json`). A small HTTP bridge on the internal Supervisor network (port 8099) feeds every Assist request into that session. |
 | **Integration** *Claude Code Assist* | `custom_components/claude_code_agent/` | Adds a conversation agent (`conversation.claude_code`) that sends Assist requests to the app. |
 
 Claude Code lives in an app because the regular terminal / code-server apps lose anything installed in `/root` when they restart.
@@ -38,12 +38,23 @@ Claude Code lives in an app because the regular terminal / code-server apps lose
 | `oauth_token` | – | Token from `claude setup-token` (valid ~1 year). |
 | `model` | `sonnet` | Claude Code model alias or ID (`haiku` is faster, `opus` smarter). |
 | `timeout_seconds` | `180` | Maximum time per request. |
+| `compact_hour` | `4` | Hour of the day (local time) at which the conversation is compacted with `/compact`. |
 | `extra_instructions` | – | Appended to the system prompt. |
 
 The assistant's standing instructions live in the app at `/data/workspace/CLAUDE.md` (created from
 `rootfs/defaults/CLAUDE.md` on first start; edit it to describe your home).
 
-Follow-up questions within 30 minutes continue the same Claude Code session.
+## One continuous conversation
+
+All Assist requests — from every user and device — go into **one continuous Claude Code conversation**, so it remembers
+earlier questions and what it did. Each message carries a header with user, device, language and time.
+
+- The process stays running, so there is no start-up cost per request (simple questions answer in a few seconds).
+- The session id is stored in `/data/state.json`; after an app restart the session is resumed with `--resume`.
+- Every day at `compact_hour` the conversation is compacted with `/compact` (Claude Code also auto-compacts when the
+  context fills up).
+- Bridge endpoints (Bearer token required): `POST /conversation`, `POST /compact` (compact now),
+  `POST /reset` (start a new conversation). `GET /health` shows the session id and last compaction.
 
 ## ⚠️ Security
 
@@ -56,7 +67,7 @@ The bridge is only reachable on the internal Supervisor network and requires a s
 
 ## Notes
 - Requests count against your Claude plan's usage limits.
-- Expect roughly 5–10 s for simple requests and longer when tools are used; fine for chat, a bit slow for voice.
+- Requests are handled one at a time; simple ones take a few seconds, tool-heavy ones longer.
 - amd64 only for now (add more architectures in `config.yaml` / `build.yaml`).
 
 This is an unofficial community project and is not affiliated with Anthropic or Home Assistant.
