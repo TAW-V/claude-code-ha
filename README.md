@@ -1,4 +1,4 @@
-# Claude Code for Home Assistant
+# Claude Code for Home Assistant Assist
 
 Use **Claude Code** — with your own Claude subscription and full tool use — as a Home Assistant **Assist conversation agent**.
 
