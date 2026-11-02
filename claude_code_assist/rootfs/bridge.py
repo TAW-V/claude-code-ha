@@ -513,6 +513,17 @@ class ClaudeSession:
             return True
         return any(of_req(j["root"]) for j in self.jobs)
 
+    def user_work(self, user: str) -> list:
+        """Descriptions of this user's background work that has not been reported yet (running or being reported)."""
+        with self.cond:
+            roots = list(self.running) + self.notified + self.turn_roots + [j["root"] for j in self.jobs]
+            out = []
+            for root in roots:
+                task = self.tasks.get(root)
+                if task and (task.get("owner") or {}).get("user") == user and task["desc"] not in out:
+                    out.append(task["desc"])
+            return out
+
     def task_summary(self, for_owner: dict | None) -> str:
         with self.cond:
             items = []
@@ -824,6 +835,7 @@ class Handler(BaseHTTPRequestHandler):
             since = int((re.search(r"since=(\d+)", query) or [0, 0])[1])
             self._reply(200, {"user": user, "messages": chat_since(user, since),
                               "pending": PANEL_BUSY.get(user, 0) > 0,
+                              "working_on": SESSION.user_work(user),
                               "background_tasks": SESSION.task_summary(None) or None})
         elif path == "/instructions" and self.headers.get("Authorization") == f"Bearer {TOKEN}":
             with open(INSTRUCTIONS_FILE) as f:

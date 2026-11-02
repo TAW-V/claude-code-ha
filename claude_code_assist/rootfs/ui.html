@@ -183,11 +183,16 @@ async function poll() {
     const d = await api("chat?since=" + lastId);
     for (const m of d.messages) { addBubble(m); lastId = Math.max(lastId, m.id); }
     let typing = document.querySelector(".typing");
-    if (d.pending && !typing) { typing = document.createElement("div"); typing.className = "typing"; typing.textContent = "Claude is working…"; $("log").appendChild(typing); }
-    if (!d.pending && typing) typing.remove();
-    if (typing) $("log").appendChild(typing);
+    const work = d.working_on || [];
+    const busy = d.pending || work.length > 0;
+    if (busy && !typing) { typing = document.createElement("div"); typing.className = "typing"; }
+    if (!busy && typing) { typing.remove(); typing = null; }
+    if (typing) {
+      typing.textContent = d.pending ? "Claude is working…" : "Claude is working in the background: " + work.join("; ") + "…";
+      $("log").appendChild(typing);
+    }
     $("chatInfo").textContent = d.background_tasks ? "Running in the background: " + d.background_tasks : `Signed in as ${d.user}`;
-    if (d.messages.length || d.pending) { if (nearBottom || d.messages.some(m => m.role === "user")) scrollDown(); }
+    if (d.messages.length || busy) { if (nearBottom || d.messages.some(m => m.role === "user")) scrollDown(); }
   } catch (e) { $("chatInfo").textContent = "Error: " + e.message; }
 }
 async function send() {
