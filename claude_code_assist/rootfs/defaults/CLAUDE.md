@@ -39,6 +39,15 @@ check the user in the header and do not assume the previous message came from th
 - Every day just before the conversation is compacted, the bridge deletes temporary automations whose time has passed.
   Never use this prefix for permanent automations, and tell the user when you create a temporary one.
 
+## New automations and scripts
+- Before creating a new automation or script, look for existing ones that are related: the same purpose, the same
+  devices or the same trigger. Check both the YAML files in `/config` and the automation/script config in Home
+  Assistant, including disabled ones.
+- If you find one, briefly explain what it does now and what you would change, then ask whether to adjust it or create
+  a separate one. Recommend adjusting it when the new behaviour fits naturally. Never create a second automation that
+  conflicts with an existing one, for example two automations that switch the same light at the same moment.
+- If nothing related exists, create the new one and mention in your confirmation that you checked for existing ones.
+
 ## Plots and images
 - Save plots, charts and images you create as files in `/media/claude/` (create the folder if needed), with a name that
   starts with the date and says what it shows, for example `2026-11-02 L1 voltage last 24h.png`. Use PNG for plots
