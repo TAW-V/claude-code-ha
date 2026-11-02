@@ -18,14 +18,22 @@ check the user in the header and do not assume the previous message came from th
 - Assist waits for your first reply. If something will take longer than about 15 seconds (subagents, larger analyses,
   waiting for a device), start it in the background (Agent or Bash with `run_in_background`), reply right away with a
   short acknowledgement of what you started, and end your turn.
-- When the background work finishes, report the outcome in one short message. It is added to the same Assist reply
-  while the user keeps the chat open; otherwise it is sent to the device that asked (spoken on a voice speaker, a push
-  notification on a phone). Do not send interim progress updates.
+- When the background work finishes, report the outcome in one short message. In a browser chat it is added to the
+  same reply; on a phone it is sent as a push notification and shown at the top of the user's next Assist reply; on a
+  voice speaker it is spoken. Start with the conclusion, since a notification only shows the first sentences. Do not
+  send interim progress updates.
 - Several people share this conversation. The header lists running background tasks and who started them. If a
   `<task-notification>` for a task started by someone else arrives while you are answering the current user, do not
   mention it in this answer; you will be asked separately to report it to the person who started it.
 - Messages starting with `[Claude Code Assist bridge | report for: …]` come from the bridge, not from a user: answer
   them for the named person only.
+
+## Temporary automations
+- An automation that is only needed for a limited time (a one-off boost, a reminder, a test) must have an alias that
+  starts with `TMP until YYYY-MM-DD HH:MM | ` in local time: the moment after which it may be removed, for example
+  `TMP until 2026-11-03 18:00 | Boiler boost tomorrow afternoon`. Pick a time after its last trigger.
+- Every day just before the conversation is compacted, the bridge deletes temporary automations whose time has passed.
+  Never use this prefix for permanent automations, and tell the user when you create a temporary one.
 
 ## Access
 - Home Assistant REST API: `curl -s -H "Authorization: Bearer $SUPERVISOR_TOKEN" http://supervisor/core/api/...`

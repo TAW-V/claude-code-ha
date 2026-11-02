@@ -50,10 +50,10 @@ that…") and keeps working in the background. The result goes back to **the dev
 
 | Asked from | Result |
 |---|---|
-| Assist chat (app, browser) | Streamed into the **same reply** while the chat is open (up to `followup_wait_seconds`). If the chat was closed or it takes longer: a push notification to the asking user's mobile app(s). |
-| Mobile app with a known device | Push notification to that device. |
+| Assist in the browser | Streamed into the **same reply** while the chat is open (up to `followup_wait_seconds`); a new question in the same chat takes over the wait. |
+| Companion app (phone, watch) | The reply closes after the answer (the app mixes up streamed text of overlapping replies). The result is sent as a **short push notification** and shown in full at the **top of your next Assist reply**, separated by a blank line. |
 | Voice satellite (e.g. Home Assistant Voice) | Answer right away; the result is **spoken on the same satellite** (`assist_satellite.announce`). |
-| Unknown | Persistent notification in Home Assistant. |
+| Unknown | Persistent notification in Home Assistant, and at the top of the user's next reply. |
 
 Every follow-up also fires a `claude_code_assist_followup` event (`text`, `user`, `device`) for your own automations.
 
@@ -81,6 +81,13 @@ Everyone shares one conversation, but **background results belong to whoever sta
 Best effort: a folded answer can still occasionally mention someone else's result, and progress messages are only
 shown in an open chat (never pushed or announced).
 
+## Temporary automations
+
+The default instructions tell Claude to give automations that are only needed for a while an alias starting with
+`TMP until YYYY-MM-DD HH:MM | ` (local time), e.g. `TMP until 2026-11-03 18:00 | Boiler boost`. Every day at
+`compact_hour`, just before the conversation is compacted, the bridge deletes temporary automations whose time has
+passed (and fires a `claude_code_assist_cleanup` event). `POST /cleanup` runs it immediately.
+
 ## Web UI
 
 Open the app (**Open Web UI**, or **Claude Code** in the sidebar for admins) to:
@@ -103,7 +110,7 @@ earlier questions and what it did. Each message carries a header with user, devi
 - Every day at `compact_hour` the conversation is compacted with `/compact` (Claude Code also auto-compacts when the
   context fills up).
 - Bridge endpoints (Bearer token required): `POST /conversation`, `POST /compact` (compact now),
-  `POST /reset` (start a new conversation), `POST /instructions`. `GET /health` shows the session id and last compaction.
+  `POST /reset` (start a new conversation), `POST /instructions`, `POST /cleanup`. `GET /health` shows the session id and last compaction.
 
 ## ⚠️ Security
 

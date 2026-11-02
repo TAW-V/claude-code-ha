@@ -66,13 +66,91 @@ def to_speech(text: str) -> str:
     return text.strip()
 
 
-def ha_call(path: str, body: dict) -> None:
+def ha_request(method: str, path: str, body: dict | None = None):
     req = urllib.request.Request(
-        f"{HA_API}/{path}", method="POST", data=json.dumps(body).encode(),
+        f"{HA_API}/{path}", method=method, data=json.dumps(body).encode() if body is not None else None,
         headers={"Authorization": f"Bearer {os.environ.get('SUPERVISOR_TOKEN', '')}",
                  "Content-Type": "application/json"},
     )
-    urllib.request.urlopen(req, timeout=15).read()
+    data = urllib.request.urlopen(req, timeout=15).read()
+    return json.loads(data) if data else None
+
+
+def ha_call(path: str, body: dict) -> None:
+    ha_request("POST", path, body)
+
+
+# ---------- inbox: results that reached the user outside the chat are shown at the top of their next reply ----------
+INBOX_LOCK = threading.Lock()
+
+
+def inbox_add(user: str | None, text: str) -> None:
+    if not user:
+        return
+    with INBOX_LOCK:
+        state = load_state()
+        state.setdefault("inbox", {}).setdefault(user, []).append(text)
+        save_state(state)
+        if "SESSION" in globals():
+            SESSION.state["inbox"] = state["inbox"]
+
+
+def inbox_pop(user: str | None) -> list:
+    if not user:
+        return []
+    with INBOX_LOCK:
+        state = load_state()
+        items = state.get("inbox", {}).pop(user, [])
+        if items:
+            save_state(state)
+            if "SESSION" in globals():
+                SESSION.state["inbox"] = state["inbox"]
+        return items
+
+
+def summary(text: str, limit: int = 180) -> str:
+    """Short version for a push notification: whole sentences up to about `limit` characters."""
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    end = max(cut.rfind(". "), cut.rfind("! "), cut.rfind("? "))
+    return (cut[: end + 1] if end > 60 else cut.rsplit(" ", 1)[0]) + " …"
+
+
+# ---------- temporary automations ----------
+TMP_ALIAS = re.compile(r"^\s*TMP until (\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})\s*\|")
+
+
+def cleanup_temporary_automations() -> list:
+    """Delete automations whose alias starts with 'TMP until YYYY-MM-DD HH:MM |' and whose time has passed."""
+    removed = []
+    now = datetime.now()
+    for state in ha_request("GET", "states") or []:
+        if not state["entity_id"].startswith("automation."):
+            continue
+        name = state["attributes"].get("friendly_name") or ""
+        m = TMP_ALIAS.match(name)
+        auto_id = state["attributes"].get("id")
+        if not m or not auto_id:
+            continue
+        try:
+            until = datetime.strptime(f"{m.group(1)} {m.group(2)}", "%Y-%m-%d %H:%M")
+        except ValueError:
+            continue
+        if until > now:
+            continue
+        try:
+            ha_request("DELETE", f"config/automation/config/{auto_id}")
+            removed.append(name)
+            log(f"removed temporary automation {name!r} ({state['entity_id']})")
+        except Exception as err:  # noqa: BLE001
+            log(f"could not remove temporary automation {name!r}: {err}")
+    if removed:
+        try:
+            ha_call("events/claude_code_assist_cleanup", {"removed": removed})
+        except Exception:  # noqa: BLE001
+            pass
+    return removed
 
 
 def deliver_followup(text: str, requester: dict) -> None:
@@ -84,10 +162,14 @@ def deliver_followup(text: str, requester: dict) -> None:
     log(f"follow-up to {targets or 'persistent notification'}: {text[:100]!r}")
     calls = [("services/assist_satellite/announce", {"entity_id": ent, "message": text})
              for ent in targets.get("announce", [])]
+    if not targets.get("announce"):
+        # Not heard on a speaker: the full text is shown at the top of the user's next Assist reply.
+        inbox_add(requester.get("user"), text)
     for service in targets.get("notify", []):
         domain, _, name = service.partition(".")
+        short = summary(text)
         calls.append((f"services/{domain}/{name}", {
-            "title": "Claude Code", "message": text,
+            "title": "Claude Code", "message": short if short == text else short + "\n(Full answer in Assist.)",
             "data": {"tag": "claude_code_assist", "group": "claude_code_assist"},
         }))
     if not calls:
@@ -581,6 +663,10 @@ def compact_scheduler() -> None:
         if nxt <= now:
             nxt += timedelta(days=1)
         time.sleep((nxt - now).total_seconds())
+        try:
+            cleanup_temporary_automations()
+        except Exception as err:  # noqa: BLE001
+            log(f"temporary automation cleanup failed: {err}")
         if SESSION.state.get("session_id"):
             SESSION.compact()
 
@@ -695,6 +781,8 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/instructions/default":
             with open("/defaults/CLAUDE.md") as f:
                 self._reply(200, {"ok": True, "instructions": f.read()})
+        elif path == "/cleanup":
+            self._reply(200, {"ok": True, "removed": cleanup_temporary_automations()})
         elif path == "/compact":
             threading.Thread(target=SESSION.compact, daemon=True).start()
             self._reply(202, {"ok": True})
@@ -739,13 +827,20 @@ class Handler(BaseHTTPRequestHandler):
 
         owner = {"user": req.get("user"), "device": req.get("device"), "followup": req.get("followup") or {}}
         SESSION.take_over(owner)
+        for earlier in inbox_pop(owner.get("user")):  # results that went out as a notification meanwhile
+            try:
+                emit({"type": "text", "text": "📋 " + earlier})
+            except OSError:
+                inbox_add(owner.get("user"), earlier)
         started = time.time()
         text, ok = SESSION.ask(f"{request_context(req, owner)}\n{req.get('text', '')}", owner=owner)
         log(f"{time.time() - started:.1f}s ok={ok} device={req.get('device')!r} q={req.get('text', '')[:80]!r}")
         followed = False
         try:
             emit({"type": "text", "text": to_speech(text) or "I did not get an answer."})
-            if ok and req.get("follow", True):
+            # The Companion app (a request with a device) shows streamed text of overlapping replies in the newest
+            # bubble, so its replies close after the answer; results then arrive as a push and in the next reply.
+            if ok and req.get("follow", True) and not req.get("device"):
                 followed = True  # follow() takes over the handed-over work itself
                 SESSION.follow(owner, emit, alive)
             emit({"type": "done"})
