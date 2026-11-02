@@ -40,20 +40,23 @@ Claude Code lives in an app because the regular terminal / code-server apps lose
 | `effort` | *(Claude Code default)* | Optional reasoning effort: `low`, `medium`, `high`, `xhigh`, `max`. Lower is faster. |
 | `timeout_seconds` | `180` | Maximum time per request. |
 | `compact_hour` | `4` | Hour of the day (local time) at which the conversation is compacted with `/compact`. |
-| `followup_wait_seconds` | `600` | How long an Assist reply stays open for results of background work (0 = answer only). |
-| `followup_notify` | – | Comma-separated notify services (e.g. `notify.mobile_app_my_phone`) that also receive follow-ups. |
+| `followup_wait_seconds` | `240` | How long an Assist reply stays open for results of background work (0 = answer only; Home Assistant ends Assist runs from the app after 300 s). |
 | `extra_instructions` | – | Appended to the system prompt. |
 
 ## Long tasks and follow-ups
 
 For work that takes a while (subagents, larger analyses) the assistant answers right away ("I started an agent
-that…") and keeps working in the background. The integration streams the reply, so the result appears in the **same
-Assist chat** as soon as it is ready — the reply stays open while background work runs, up to `followup_wait_seconds`.
+that…") and keeps working in the background. The result goes back to **the device that asked**:
 
-Results that arrive after that (or when a new question was asked in the meantime) are sent as a Home Assistant
-notification, or to the `followup_notify` services. Every follow-up also fires a `claude_code_assist_followup` event
-(`text`, `user`, `device`) that you can use in automations, e.g. to announce it on a speaker. Because Home Assistant
-keeps the reply open even if you close the chat, set `followup_notify` to your phone if you don't want to miss results.
+| Asked from | Result |
+|---|---|
+| Assist chat (app, browser) | Streamed into the **same reply** while the chat is open (up to `followup_wait_seconds`). If the chat was closed or it takes longer: a push notification to the asking user's mobile app(s). |
+| Mobile app with a known device | Push notification to that device. |
+| Voice satellite (e.g. Home Assistant Voice) | Answer right away; the result is **spoken on the same satellite** (`assist_satellite.announce`). |
+| Unknown | Persistent notification in Home Assistant. |
+
+Every follow-up also fires a `claude_code_assist_followup` event (`text`, `user`, `device`) for your own automations.
+The bridge uses `--replay-user-messages` to match each result to the question it answers.
 
 ## Web UI
 

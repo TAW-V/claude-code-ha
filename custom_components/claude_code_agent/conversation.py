@@ -10,9 +10,10 @@ from homeassistant.components import conversation
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import MATCH_ALL
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.util import slugify
 
 from .const import CONF_TOKEN, CONF_URL, DOMAIN
 
@@ -55,6 +56,7 @@ class ClaudeCodeConversationEntity(conversation.ConversationEntity, conversation
         if user_input.device_id:
             device = dr.async_get(self.hass).async_get(user_input.device_id)
             device_name = (device.name_by_user or device.name) if device else None
+        followup = self._followup_targets(user_input)
 
         payload = {
             "text": user_input.text,
@@ -62,10 +64,44 @@ class ClaudeCodeConversationEntity(conversation.ConversationEntity, conversation
             "language": user_input.language,
             "user": user_name,
             "device": device_name,
+            # Where results go that arrive after the reply is closed. A voice satellite cannot keep a reply open,
+            # so it gets the answer right away and hears the rest as an announcement.
+            "followup": followup,
+            "follow": not followup["announce"],
         }
         async for _content in chat_log.async_add_delta_content_stream(self.entity_id, self._stream(payload)):
             pass
         return conversation.async_get_result_from_chat_log(user_input, chat_log)
+
+    def _followup_targets(self, user_input: conversation.ConversationInput) -> dict[str, list[str]]:
+        """The device that asked: its satellite, its mobile app, or else the asking user's mobile apps."""
+        announce: list[str] = []
+        notify: list[str] = []
+        if user_input.device_id:
+            device = dr.async_get(self.hass).async_get(user_input.device_id)
+            announce = [
+                ent.entity_id
+                for ent in er.async_entries_for_device(er.async_get(self.hass), user_input.device_id)
+                if ent.domain == "assist_satellite"
+            ]
+            if device:
+                notify = [
+                    self._mobile_app_service(entry)
+                    for entry in self.hass.config_entries.async_entries("mobile_app")
+                    if entry.entry_id in device.config_entries
+                ]
+        if not announce and not notify and user_input.context.user_id:
+            notify = [
+                self._mobile_app_service(entry)
+                for entry in self.hass.config_entries.async_entries("mobile_app")
+                if entry.data.get("user_id") == user_input.context.user_id
+            ]
+        return {"announce": announce, "notify": [s for s in notify if s]}
+
+    @staticmethod
+    def _mobile_app_service(entry) -> str:
+        name = entry.data.get("device_name")
+        return f"notify.mobile_app_{slugify(name)}" if name else ""
 
     async def _stream(self, payload: dict) -> AsyncGenerator[conversation.AssistantContentDeltaDict]:
         """Answer first, then follow-up results while Claude Code keeps working, all in one message."""

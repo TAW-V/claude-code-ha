@@ -7,7 +7,8 @@ message of one continuous conversation. The session id is persisted, so the conv
 The first result after a request is the Assist answer. Claude Code can keep working afterwards (background agents,
 monitors) and later produce more results on its own. With /conversation/stream those are streamed into the same Assist
 reply while the background work runs (up to FOLLOWUP_WAIT seconds). Results nobody is waiting for any more are
-delivered as a notification and a `claude_code_assist_followup` event in Home Assistant.
+delivered to the device that asked: spoken on a voice satellite, else a push notification to its mobile app (or the
+user's mobile apps), else a persistent notification. Each also fires a `claude_code_assist_followup` event.
 """
 
 import json
@@ -17,6 +18,7 @@ import subprocess
 import threading
 import time
 import urllib.request
+import uuid
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -29,8 +31,7 @@ TIMEOUT = int(os.environ.get("CCA_TIMEOUT", "180"))
 EXTRA = os.environ.get("CCA_EXTRA", "")
 EFFORT = os.environ.get("CCA_EFFORT", "")
 COMPACT_HOUR = int(os.environ.get("CCA_COMPACT_HOUR", "4"))
-FOLLOWUP_WAIT = int(os.environ.get("CCA_FOLLOWUP_WAIT", "600"))
-FOLLOWUP_NOTIFY = [s.strip() for s in os.environ.get("CCA_FOLLOWUP_NOTIFY", "").split(",") if s.strip()]
+FOLLOWUP_WAIT = int(os.environ.get("CCA_FOLLOWUP_WAIT", "240"))  # HA ends Assist runs from the app after 300 s
 TOOLS = "Bash Read Edit Write Glob Grep WebFetch WebSearch TodoWrite Agent"
 HA_API = "http://supervisor/core/api"
 
@@ -73,25 +74,29 @@ def ha_call(path: str, body: dict) -> None:
 
 
 def deliver_followup(text: str, requester: dict) -> None:
-    """Send a result that arrived after the Assist answer to Home Assistant."""
+    """Send a result that arrived after the Assist reply closed to the device that asked."""
     text = to_speech(text)
     if not text:
         return
-    log(f"follow-up: {text[:100]!r}")
-    try:
-        ha_call("events/claude_code_assist_followup", {"text": text, **requester})
-    except Exception as err:  # noqa: BLE001 - delivery is best effort
-        log(f"follow-up event failed: {err}")
-    targets = FOLLOWUP_NOTIFY or ["persistent_notification.create"]
-    for target in targets:
-        domain, _, service = target.partition(".")
-        data = {"title": "Claude Code", "message": text}
-        if domain == "notify":
-            data["data"] = {"tag": "claude_code_assist", "group": "claude_code_assist"}
+    targets = requester.get("followup") or {}
+    log(f"follow-up to {targets or 'persistent notification'}: {text[:100]!r}")
+    calls = [("services/assist_satellite/announce", {"entity_id": ent, "message": text})
+             for ent in targets.get("announce", [])]
+    for service in targets.get("notify", []):
+        domain, _, name = service.partition(".")
+        calls.append((f"services/{domain}/{name}", {
+            "title": "Claude Code", "message": text,
+            "data": {"tag": "claude_code_assist", "group": "claude_code_assist"},
+        }))
+    if not calls:
+        calls = [("services/persistent_notification/create", {"title": "Claude Code", "message": text})]
+    calls.append(("events/claude_code_assist_followup",
+                  {"text": text, "user": requester.get("user"), "device": requester.get("device")}))
+    for path, body in calls:
         try:
-            ha_call(f"services/{domain}/{service}", data)
-        except Exception as err:  # noqa: BLE001
-            log(f"follow-up via {target} failed: {err}")
+            ha_call(path, body)
+        except Exception as err:  # noqa: BLE001 - delivery is best effort
+            log(f"follow-up via {path} failed: {err}")
 
 
 class ClaudeSession:
@@ -113,6 +118,7 @@ class ClaudeSession:
             "claude", "-p",
             "--input-format", "stream-json",
             "--output-format", "stream-json", "--verbose",
+            "--replay-user-messages",  # echoes our messages, so we know which result answers which question
             "--model", MODEL,
             "--allowedTools", TOOLS,
             "--add-dir", "/config", "/addons", "/share",
@@ -142,6 +148,10 @@ class ClaudeSession:
             if kind == "system" and event.get("subtype") == "init":
                 with self.cond:
                     self.busy = True
+            elif kind == "user" and event.get("isReplay"):
+                with self.cond:
+                    if self.waiter and event.get("uuid") == self.waiter["uuid"]:
+                        self.waiter["acked"] = True
             elif kind == "system" and event.get("subtype") == "background_tasks_changed":
                 with self.cond:
                     self.bg_tasks = event.get("tasks") or []
@@ -162,7 +172,11 @@ class ClaudeSession:
         text, ok = event.get("result") or "", not event.get("is_error")
         with self.cond:
             self.busy = False
-            waiter, self.waiter = self.waiter, None
+            # Only a result that comes after our message was picked up answers it; anything earlier is a turn
+            # Claude Code ran on its own (e.g. a background task that finished) and is treated as a follow-up.
+            waiter = self.waiter if self.waiter and self.waiter["acked"] else None
+            if waiter:
+                self.waiter = None
             listener = self.listener if not waiter else None
             if waiter:
                 waiter["result"] = (text, ok)
@@ -170,7 +184,7 @@ class ClaudeSession:
             elif listener is not None:
                 listener.append(text)
             self.cond.notify_all()
-        if not waiter and listener is None:
+        if not waiter and listener is None and text.strip():
             threading.Thread(target=deliver_followup, args=(text, dict(self.requester)), daemon=True).start()
 
     @staticmethod
@@ -198,11 +212,13 @@ class ClaudeSession:
                 self.end_stream()  # a new question ends waiting for the previous one's follow-ups
                 with self.cond:  # let a turn Claude Code started on its own finish first (it becomes a follow-up)
                     self.cond.wait_for(lambda: not self.busy, timeout=timeout)
-                    waiter = {"done": threading.Event(), "result": None, "dead": False}
+                    waiter = {"done": threading.Event(), "result": None, "dead": False,
+                              "uuid": str(uuid.uuid4()), "acked": False}
                     self.waiter = waiter
                 if requester is not None:
                     self.requester = requester
-                msg = {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": text}]}}
+                msg = {"type": "user", "uuid": waiter["uuid"],
+                       "message": {"role": "user", "content": [{"type": "text", "text": text}]}}
                 try:
                     self.proc.stdin.write(json.dumps(msg) + "\n")
                     self.proc.stdin.flush()
@@ -246,10 +262,6 @@ class ClaudeSession:
                     finished = self.listener is not mine or not (self.busy or self.bg_tasks)
                 for text in pending:
                     emit({"type": "text", "text": to_speech(text)})
-                    # HA keeps the stream open even if the chat was closed, so also notify when configured.
-                    if FOLLOWUP_NOTIFY:
-                        threading.Thread(target=deliver_followup, args=(text, dict(self.requester)),
-                                         daemon=True).start()
                 if finished or time.time() > deadline:
                     return
                 emit({"type": "ping"})  # keeps the connection alive and detects a closed client
@@ -397,7 +409,7 @@ class Handler(BaseHTTPRequestHandler):
                 f" | time: {time.strftime('%Y-%m-%d %H:%M')}]"
             )
             started = time.time()
-            requester = {"user": req.get("user"), "device": req.get("device")}
+            requester = {"user": req.get("user"), "device": req.get("device"), "followup": req.get("followup") or {}}
             text, ok = SESSION.ask(f"{context}\n{req.get('text', '')}", requester=requester)
             log(f"{time.time() - started:.1f}s ok={ok} q={req.get('text', '')[:80]!r}")
             self._reply(200, {"speech": to_speech(text) or "I did not get an answer.",
@@ -422,13 +434,13 @@ class Handler(BaseHTTPRequestHandler):
             f" | device: {req.get('device') or 'unknown'} | language: {req.get('language') or 'unknown'}"
             f" | time: {time.strftime('%Y-%m-%d %H:%M')}]"
         )
-        requester = {"user": req.get("user"), "device": req.get("device")}
+        requester = {"user": req.get("user"), "device": req.get("device"), "followup": req.get("followup") or {}}
         started = time.time()
         text, ok = SESSION.ask(f"{context}\n{req.get('text', '')}", requester=requester)
-        log(f"{time.time() - started:.1f}s ok={ok} q={req.get('text', '')[:80]!r}")
+        log(f"{time.time() - started:.1f}s ok={ok} device={req.get('device')!r} q={req.get('text', '')[:80]!r}")
         try:
             emit({"type": "text", "text": to_speech(text) or "I did not get an answer."})
-            if ok:
+            if ok and req.get("follow", True):
                 SESSION.follow(emit)
             emit({"type": "done"})
         except (BrokenPipeError, ConnectionResetError):

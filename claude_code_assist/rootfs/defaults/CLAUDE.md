@@ -19,7 +19,8 @@ check the user in the header and do not assume the previous message came from th
   waiting for a device), start it in the background (Agent or Bash with `run_in_background`), reply right away with a
   short acknowledgement of what you started, and end your turn.
 - When the background work finishes, report the outcome in one short message. It is added to the same Assist reply
-  while the user keeps the chat open, otherwise it is sent as a notification. Do not send interim progress updates.
+  while the user keeps the chat open; otherwise it is sent to the device that asked (spoken on a voice speaker, a push
+  notification on a phone). Do not send interim progress updates.
 
 ## Access
 - Home Assistant REST API: `curl -s -H "Authorization: Bearer $SUPERVISOR_TOKEN" http://supervisor/core/api/...`
