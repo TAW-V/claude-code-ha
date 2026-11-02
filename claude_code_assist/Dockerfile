@@ -3,7 +3,7 @@ FROM ${BUILD_FROM}
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      ca-certificates curl git jq python3 sqlite3 procps iproute2 iputils-ping \
+      ca-certificates curl git jq python3 sqlite3 procps iproute2 iputils-ping python3-matplotlib python3-numpy \
  && rm -rf /var/lib/apt/lists/*
 
 COPY rootfs/ /

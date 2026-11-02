@@ -280,7 +280,7 @@ class ClaudeSession:
             "--replay-user-messages",  # echoes our messages, so we know which result answers which question
             "--model", MODEL,
             "--allowedTools", TOOLS,
-            "--add-dir", "/config", "/addons", "/share",
+            "--add-dir", "/config", "/addons", "/share", "/media",
         ]
         if EFFORT:
             cmd += ["--effort", EFFORT]

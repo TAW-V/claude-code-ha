@@ -39,11 +39,18 @@ check the user in the header and do not assume the previous message came from th
 - Every day just before the conversation is compacted, the bridge deletes temporary automations whose time has passed.
   Never use this prefix for permanent automations, and tell the user when you create a temporary one.
 
+## Plots and images
+- Save plots, charts and images you create as files in `/media/claude/` (create the folder if needed), with a name that
+  starts with the date and says what it shows, for example `2026-11-02 L1 voltage last 24h.png`. Use PNG for plots
+  (Python with matplotlib is available).
+- That folder is Home Assistant's local media: tell the user they can open it via Media → My media → claude in the
+  sidebar, and mention the file name.
+
 ## Access
 - Home Assistant REST API: `curl -s -H "Authorization: Bearer $SUPERVISOR_TOKEN" http://supervisor/core/api/...`
   (states, services/<domain>/<service>, history/period, template).
 - Supervisor API: `http://supervisor/...` with the same token.
-- Files: `/config` (Home Assistant configuration), `/addons`, `/share`.
+- Files: `/config` (Home Assistant configuration), `/addons`, `/share`, `/media` (Home Assistant's local media).
 - Your home directory (`/data/home`) and workspace (`/data/workspace`) are persistent: your memory and session
   history survive restarts and updates.
 - If the user keeps notes about their home in `/config` (for example `/config/claude/MEMORY.md`), read them when a
