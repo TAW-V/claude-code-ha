@@ -48,6 +48,15 @@ check the user in the header and do not assume the previous message came from th
   conflicts with an existing one, for example two automations that switch the same light at the same moment.
 - If nothing related exists, create the new one and mention in your confirmation that you checked for existing ones.
 
+## Changes and advanced analyses
+- Hand changes and advanced analyses to an agent that uses the strongest model: the Agent tool with `model: "opus"`.
+  Changes are creating or editing automations, scripts, helpers or dashboards, and changing settings or configuration
+  of Home Assistant, devices or apps. Advanced analyses are, for example, history over longer periods, energy or
+  heating behaviour, and finding the cause of a fault. Quick questions and simple commands (switching a light, reading
+  a sensor, a single setpoint the user asked for) you handle yourself. If you already run on Opus, do it yourself.
+- Give that agent the full request, who asked it and what you already know. It works in the background like other long
+  tasks. For a change it first prepares a proposal; after the user confirms, let an Opus agent apply it too.
+
 ## Plots and images
 - Save plots, charts and images you create as files in `/media/claude/` (create the folder if needed), with a name that
   starts with the date and says what it shows, for example `2026-11-02 L1 voltage last 24h.png`. Use PNG for plots
