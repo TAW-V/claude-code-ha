@@ -92,13 +92,17 @@ def inbox_add(user: str | None, text: str) -> None:
         return
     with INBOX_LOCK:
         state = load_state()
-        state.setdefault("inbox", {}).setdefault(user, []).append(text)
+        state.setdefault("inbox", {}).setdefault(user, []).append({"ts": time.time(), "text": text})
         save_state(state)
         if "SESSION" in globals():
             SESSION.state["inbox"] = state["inbox"]
 
 
+INBOX_MAX_AGE = 24 * 3600  # older results are dropped (they are in the chat history anyway)
+
+
 def inbox_pop(user: str | None) -> list:
+    """The user's waiting results as (time HH:MM, text), oldest first; empties the inbox."""
     if not user:
         return []
     with INBOX_LOCK:
@@ -108,7 +112,9 @@ def inbox_pop(user: str | None) -> list:
             save_state(state)
             if "SESSION" in globals():
                 SESSION.state["inbox"] = state["inbox"]
-        return items
+    now = time.time()
+    return [(time.strftime("%H:%M", time.localtime(i["ts"])), i["text"]) for i in items
+            if isinstance(i, dict) and now - i.get("ts", 0) < INBOX_MAX_AGE]
 
 
 def summary(text: str, limit: int = 180) -> str:
@@ -1019,6 +1025,7 @@ def request_context(req: dict, owner: dict) -> str:
 def panel_ask(user: str, text: str) -> None:
     """A message from the panel chat; the answer and any later results go into the user's chat history."""
     owner = {"user": user, "device": PANEL_DEVICE, "panel": True, "followup": {}}
+    inbox_pop(user)  # results waiting for the user's next Assist reply are in this chat's history already
     req = {"user": user, "device": PANEL_DEVICE, "client": "panel", "language": "unknown"}
     started = time.time()
     try:
@@ -1199,19 +1206,19 @@ class Handler(BaseHTTPRequestHandler):
 
         owner = {"user": req.get("user"), "device": req.get("device"), "followup": req.get("followup") or {}}
         SESSION.take_over(owner)
-        for earlier in inbox_pop(owner.get("user")):  # results that went out as a notification meanwhile
-            try:
-                emit({"type": "text", "text": "📋 " + earlier})
-            except OSError:
-                inbox_add(owner.get("user"), earlier)
         started = time.time()
         chat_add(owner.get("user"), "user", req.get("text", ""), "assist")
         text, ok = SESSION.ask(f"{request_context(req, owner)}\n{req.get('text', '')}", owner=owner)
         chat_add(owner.get("user"), "assistant", to_speech(text), "assist")
         log(f"{time.time() - started:.1f}s ok={ok} device={req.get('device')!r} q={req.get('text', '')[:80]!r}")
         followed = False
+        # Results that went out as a notification meanwhile: below the answer, so the reply arrives in one piece.
+        earlier = inbox_pop(owner.get("user"))
+        answer = to_speech(text) or "I did not get an answer."
+        if earlier:
+            answer += "".join(f"\n\n📋 Earlier result ({hhmm}): {t}" for hhmm, t in earlier)
         try:
-            emit({"type": "text", "text": to_speech(text) or "I did not get an answer."})
+            emit({"type": "text", "text": answer})
             # The Companion app (a request with a device) shows streamed text of overlapping replies in the newest
             # bubble, so its replies close after the answer; results then arrive as a push and in the next reply.
             if ok and req.get("follow", True) and not req.get("device"):
@@ -1220,6 +1227,8 @@ class Handler(BaseHTTPRequestHandler):
             emit({"type": "done"})
         except OSError:
             log("stream closed by client; further results become notifications")
+            for hhmm, t in earlier:
+                inbox_add(owner.get("user"), t)
         finally:
             if not followed:  # this question opened no reply: work handed over to it must not be lost
                 SESSION.release_handover(owner)
