@@ -11,6 +11,7 @@ delivered to the device that asked: spoken on a voice satellite, else a push not
 user's mobile apps), else a persistent notification. Each also fires a `claude_code_assist_followup` event.
 """
 
+import glob
 import json
 import os
 import re
@@ -733,6 +734,107 @@ def compact_scheduler() -> None:
             SESSION.compact()
 
 
+# ---------- session view (Settings → Session in the web UI) ----------
+SESSION_TAIL = 1_500_000  # bytes of the transcript shown when the view opens
+SESSION_CLIP = 4000  # characters per shown item
+
+
+def session_file() -> str | None:
+    sid = SESSION.state.get("session_id")
+    if not sid:
+        return None
+    found = glob.glob(os.path.join(os.environ.get("HOME", "/data/home"), ".claude", "projects", "*", f"{sid}.jsonl"))
+    return found[0] if found else None
+
+
+def _clip(text: str) -> str:
+    text = text if isinstance(text, str) else json.dumps(text, ensure_ascii=False)
+    return text if len(text) <= SESSION_CLIP else text[:SESSION_CLIP] + f"\n… ({len(text) - SESSION_CLIP} more characters)"
+
+
+def _tool_text(name: str, inp: dict) -> str:
+    if not isinstance(inp, dict):
+        return _clip(inp)
+    if name == "Bash":
+        return _clip(inp.get("command", "") + ("   [background]" if inp.get("run_in_background") else ""))
+    if name in ("Read", "Write", "Edit") and "file_path" in inp:
+        rest = {k: v for k, v in inp.items() if k != "file_path"}
+        return _clip(inp["file_path"] + ("\n" + json.dumps(rest, ensure_ascii=False, indent=1) if rest else ""))
+    if name == "Agent":
+        return _clip(f"{inp.get('description', '')}\n{inp.get('prompt', '')}".strip())
+    return _clip(json.dumps(inp, ensure_ascii=False, indent=1))
+
+
+def _result_text(content) -> str:
+    if isinstance(content, list):
+        return _clip("\n".join(b.get("text", "") if b.get("type") == "text" else f"[{b.get('type')}]"
+                               for b in content if isinstance(b, dict)))
+    return _clip(content or "")
+
+
+def session_items(entry: dict) -> list:
+    """Turn one transcript line into readable items: user, assistant, thinking, tool, result, system."""
+    kind, ts = entry.get("type"), entry.get("timestamp") or ""
+    base = {"ts": ts, "side": bool(entry.get("isSidechain"))}
+    if kind == "system":
+        if entry.get("subtype") == "compact_boundary":
+            return [{**base, "kind": "system", "text": "Conversation compacted"}]
+        return []
+    if kind not in ("user", "assistant"):
+        return []
+    msg = entry.get("message") or {}
+    content = msg.get("content")
+    if kind == "user" and entry.get("isCompactSummary"):
+        return [{**base, "kind": "system", "text": "Summary after compaction:\n" + _result_text(content)}]
+    if isinstance(content, str):
+        content = [{"type": "text", "text": content}]
+    items = []
+    for block in content or []:
+        if not isinstance(block, dict):
+            continue
+        t = block.get("type")
+        if t == "text" and block.get("text", "").strip():
+            items.append({**base, "kind": kind, "text": _clip(block["text"])})
+        elif t == "thinking" and block.get("thinking", "").strip():
+            items.append({**base, "kind": "thinking", "text": _clip(block["thinking"])})
+        elif t in ("tool_use", "server_tool_use"):
+            items.append({**base, "kind": "tool", "name": block.get("name", "?"),
+                          "text": _tool_text(block.get("name", ""), block.get("input"))})
+        elif t == "tool_result":
+            items.append({**base, "kind": "result", "error": bool(block.get("is_error")),
+                          "text": _result_text(block.get("content"))})
+    return items
+
+
+def session_since(offset: int | None, sid: str | None) -> dict:
+    """Items of the current transcript from byte offset on (the tail of it on first load or a new session)."""
+    path = session_file()
+    current = SESSION.state.get("session_id")
+    out = {"session_id": current, "items": [], "offset": 0, "reset": False, "clipped": False}
+    if not path:
+        out["reset"] = sid != current
+        return out
+    size = os.path.getsize(path)
+    if offset is None or sid != current or offset > size:
+        out["reset"] = True
+        offset = max(0, size - SESSION_TAIL)
+        out["clipped"] = offset > 0
+    with open(path, "rb") as f:
+        f.seek(offset)
+        data = f.read(size - offset)
+    if out["reset"] and offset > 0:  # started mid-line
+        cut = data.find(b"\n") + 1
+        data, offset = data[cut:], offset + cut
+    end = data.rfind(b"\n") + 1  # only complete lines; the rest is read next time
+    for line in data[:end].splitlines():
+        try:
+            out["items"].extend(session_items(json.loads(line)))
+        except (ValueError, AttributeError, TypeError):
+            continue
+    out["offset"] = offset + end
+    return out
+
+
 INGRESS_PROXY = "172.30.32.2"  # Supervisor ingress; HA already authenticated the (admin) user
 INSTRUCTIONS_FILE = os.path.join(WORKSPACE, "CLAUDE.md")
 UI_HTML = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui.html"), "rb").read()
@@ -846,6 +948,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(UI_HTML)))
             self.end_headers()
             self.wfile.write(UI_HTML)
+        elif self._from_ingress() and path == "/api/session":
+            offset = re.search(r"offset=(\d+)", query)
+            sid = re.search(r"sid=([\w-]+)", query)
+            self._reply(200, session_since(int(offset[1]) if offset else None, sid[1] if sid else None))
         elif self._from_ingress() and path == "/api/status":
             with open(INSTRUCTIONS_FILE) as f:
                 self._reply(200, {**status(), "instructions": f.read()})

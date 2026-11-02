@@ -39,6 +39,15 @@
   .composer { display: flex; gap: 8px; align-items: flex-end; position: sticky; bottom: 0; background: var(--bg); padding: 8px 0; }
   .composer textarea { min-height: 44px; max-height: 30vh; flex: 1; resize: none; font: inherit; }
   main.chat { height: 100vh; min-height: 0; }
+  #sessionLog { max-height: 70vh; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; margin-top: 8px;
+                font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .it { border-left: 3px solid var(--line); padding: 2px 8px; white-space: pre-wrap; word-wrap: break-word; }
+  .it .h { color: var(--muted); font-size: 11px; }
+  .it.user { border-color: var(--accent); } .it.assistant { border-color: #4caf50; }
+  .it.tool { border-color: #ff9800; } .it.result { border-color: #9e9e9e; } .it.result.error { border-color: #f44336; }
+  .it.system { border-color: #9c27b0; } .it.thinking { color: var(--muted); }
+  .it.side { margin-left: 24px; }
+  .it details summary { cursor: pointer; color: var(--muted); }
 </style>
 </head>
 <body>
@@ -79,6 +88,18 @@
       <button id="btnReset">Start new conversation</button>
       <span class="msg" id="sessionMsg"></span>
     </div>
+  </section>
+
+  <section class="card">
+    <h2>Session</h2>
+    <p class="hint">The raw Claude Code conversation, read-only: messages from all users, every command and tool call
+      Claude made and what came back. Agent work is indented. Updates live while open.</p>
+    <div class="row" style="margin-top:0">
+      <button id="btnSession">Show session</button>
+      <label id="sessionOpts" hidden><input type="checkbox" id="showThinking"> show thinking</label>
+      <span class="msg" id="sessionInfo"></span>
+    </div>
+    <div id="sessionLog" hidden></div>
   </section>
 
   <section class="card editor">
@@ -211,6 +232,52 @@ $("btnClearChat").onclick = async () => {
   if (!confirm("Clear your chat history? (Claude's own conversation memory is not affected.)")) return;
   await api("chat/clear", {}); $("log").innerHTML = ""; lastId = 0; poll();
 };
+// ---------- session view (Settings) ----------
+let sessOffset = null, sessId = "", sessOpen = false, sessTimer = null;
+const LABEL = { user: "message", assistant: "Claude", thinking: "thinking", tool: "tool", result: "result", system: "system" };
+function fmtTs(ts) { const d = new Date(ts); return isNaN(d) ? "" : d.toLocaleString(); }
+function addItem(it) {
+  const div = document.createElement("div");
+  div.className = `it ${it.kind}` + (it.error ? " error" : "") + (it.side ? " side" : "");
+  if (it.kind === "thinking" && !$("showThinking").checked) div.hidden = true;
+  const head = document.createElement("div");
+  head.className = "h";
+  head.textContent = [fmtTs(it.ts), it.side ? "agent" : "", it.kind === "tool" ? it.name : LABEL[it.kind] + (it.error ? " (error)" : "")]
+    .filter(Boolean).join(" · ");
+  div.appendChild(head);
+  const long = (it.kind === "result" || it.kind === "thinking") && (it.text.length > 300 || it.text.split("\n").length > 4);
+  if (long) {
+    const det = document.createElement("details"), sum = document.createElement("summary"), body = document.createElement("div");
+    sum.textContent = it.text.split("\n")[0].slice(0, 160) + " …"; body.textContent = it.text;
+    det.append(sum, body); div.appendChild(det);
+  } else {
+    const body = document.createElement("div"); body.textContent = it.text; div.appendChild(body);
+  }
+  $("sessionLog").appendChild(div);
+}
+async function pollSession() {
+  if (!sessOpen || $("settingsView").hidden) return;
+  try {
+    const log = $("sessionLog"), nearBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
+    const q = sessOffset === null ? "" : `?offset=${sessOffset}&sid=${encodeURIComponent(sessId || "")}`;
+    const d = await api("session" + q);
+    if (d.reset) { log.innerHTML = ""; }
+    sessOffset = d.offset; sessId = d.session_id || "";
+    d.items.forEach(addItem);
+    if (d.reset) $("sessionInfo").textContent = !d.session_id ? "No conversation yet." :
+      (d.clipped ? "Showing the most recent part of the session." : "");
+    if (d.reset || (d.items.length && nearBottom)) log.scrollTop = log.scrollHeight;
+  } catch (e) { $("sessionInfo").textContent = "Error: " + e.message; }
+}
+$("btnSession").onclick = () => {
+  sessOpen = !sessOpen;
+  $("sessionLog").hidden = !sessOpen; $("sessionOpts").hidden = !sessOpen;
+  $("btnSession").textContent = sessOpen ? "Hide session" : "Show session";
+  clearInterval(sessTimer);
+  if (sessOpen) { sessOffset = null; pollSession(); sessTimer = setInterval(pollSession, 3000); }
+  else { $("sessionLog").innerHTML = ""; $("sessionInfo").textContent = ""; }
+};
+$("showThinking").onchange = () => document.querySelectorAll(".it.thinking").forEach(el => el.hidden = !$("showThinking").checked);
 show("chat");
 poll().then(scrollDown);
 setInterval(poll, 2000);
