@@ -68,8 +68,14 @@ Everyone shares one conversation, but **background results belong to whoever sta
   asks Claude separately to report the result to the task's owner. The header of every message lists the running
   background tasks and who started them, and the default instructions tell Claude not to mention other people's
   results.
-- Saving instructions waits until no background task is running before restarting Claude Code; *Start new
-  conversation* stops immediately and tells owners of running tasks that they were interrupted.
+- An open reply only waits for work started by *that* question, so a long-running task (a monitor, a `sleep 600`)
+  does not keep later replies of the same user open.
+- Results of tools that wake Claude without a notification (e.g. Monitor output lines) are interim updates: shown in
+  the owner's open chat when only one person has background work running, otherwise dropped.
+- Saving instructions waits until no background task is running before restarting Claude Code. The web UI shows when
+  a restart is pending and offers **Restart now**. *Restart now* and *Start new conversation* stop immediately and tell
+  owners of running tasks that they were interrupted.
+- Set `CCA_DEBUG=1` in the bridge environment to log the Claude Code task events it routes on.
 
 Best effort: a folded answer can still occasionally mention someone else's result, and progress messages are only
 shown in an open chat (never pushed or announced).

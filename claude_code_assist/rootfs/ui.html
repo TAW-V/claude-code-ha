@@ -8,6 +8,7 @@
   :root { color-scheme: light dark; --bg: #f5f5f5; --card: #fff; --fg: #212121; --muted: #666; --line: #ddd; --accent: #03a9f4; }
   @media (prefers-color-scheme: dark) { :root { --bg: #111; --card: #1c1c1c; --fg: #e1e1e1; --muted: #9b9b9b; --line: #333; } }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   body { margin: 0; font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--fg); }
   main { max-width: 1000px; margin: 0 auto; padding: 16px; display: flex; flex-direction: column; gap: 16px; min-height: 100vh; }
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
@@ -34,6 +35,11 @@
       <div><span>Model / effort</span><b id="model">…</b></div>
       <div><span>Last compaction</span><b id="compact">…</b></div>
       <div><span>Session</span><code id="session">…</code></div>
+      <div><span>Background tasks</span><b id="tasks">…</b></div>
+    </div>
+    <div class="row" id="pendingRow" hidden>
+      <span class="msg" id="pendingMsg"></span>
+      <button id="btnRestart">Restart now</button>
     </div>
     <div class="row">
       <button id="btnCompact">Compact now</button>
@@ -79,6 +85,9 @@ async function refresh(loadText) {
   $("model").textContent = `${s.model} / ${s.effort}`;
   $("compact").textContent = (s.last_compact ? s.last_compact.replace("T", " ") : "never") + ` · daily at ${s.compact_hour}:00`;
   $("session").textContent = s.session_id || "new conversation";
+  $("tasks").textContent = s.background_tasks || "none";
+  $("pendingRow").hidden = !s.restart_pending;
+  $("pendingMsg").textContent = `New instructions are saved but not active yet: Claude Code restarts when its ${s.background_task_count} background task(s) finish.`;
   if (loadText) { saved = s.instructions; $("text").value = saved; dirty(); $("saveMsg").textContent = ""; }
 }
 
@@ -86,7 +95,7 @@ $("text").addEventListener("input", dirty);
 $("btnSave").onclick = async () => {
   $("btnSave").disabled = true; $("saveMsg").textContent = "Saving…";
   try { await api("instructions", { text: $("text").value }); saved = $("text").value; dirty();
-        $("saveMsg").textContent = "Saved. Used from the next message."; refresh(false); }
+        $("saveMsg").textContent = "Saved. Used from the next message once no background task is running."; refresh(false); }
   catch (e) { $("saveMsg").textContent = "Error: " + e.message; dirty(); }
 };
 $("btnRevert").onclick = () => { $("text").value = saved; dirty(); $("saveMsg").textContent = ""; };
@@ -97,6 +106,10 @@ $("btnDefault").onclick = async () => {
 $("btnCompact").onclick = async () => {
   await api("compact", {}); $("sessionMsg").textContent = "Compacting in the background…";
   setTimeout(() => refresh(false), 15000);
+};
+$("btnRestart").onclick = async () => {
+  if (!confirm("Restart Claude Code now? Running background tasks are interrupted; their owners get a notice.")) return;
+  await api("restart", {}); $("sessionMsg").textContent = "Restarted; new instructions apply from the next message."; refresh(false);
 };
 $("btnReset").onclick = async () => {
   if (!confirm("Start a new conversation? The assistant forgets the current conversation (memory files are kept).")) return;

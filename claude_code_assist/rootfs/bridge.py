@@ -31,8 +31,9 @@ TIMEOUT = int(os.environ.get("CCA_TIMEOUT", "180"))
 EXTRA = os.environ.get("CCA_EXTRA", "")
 EFFORT = os.environ.get("CCA_EFFORT", "")
 COMPACT_HOUR = int(os.environ.get("CCA_COMPACT_HOUR", "4"))
+DEBUG = os.environ.get("CCA_DEBUG") == "1"
 FOLLOWUP_WAIT = int(os.environ.get("CCA_FOLLOWUP_WAIT", "240"))  # HA ends Assist runs from the app after 300 s
-TOOLS = "Bash Read Edit Write Glob Grep WebFetch WebSearch TodoWrite Agent"
+TOOLS = "Bash Read Edit Write Glob Grep WebFetch WebSearch TodoWrite Agent Monitor"
 HA_API = "http://supervisor/core/api"
 
 
@@ -125,9 +126,11 @@ class ClaudeSession:
         self.busy = False  # Claude Code is in the middle of a turn
         self.waiter: dict | None = None  # request waiting for the result of its message
         self.turn_owner: dict | None = None  # owner of the turn in progress (None: spontaneous/unknown)
-        self.tasks: dict = {}  # task_id -> {"owner", "root", "desc"}; kept, ids can notify more than once
+        self.turn_req: str | None = None  # request (message uuid) whose turn is in progress
+        self.tasks: dict = {}  # task_id -> {"owner", "req", "root", "desc"}; kept, ids can notify more than once
         self.running: set = set()  # root background tasks still running (from background_tasks_changed)
-        self.notified: list = []  # roots that notified since the last result, for the next spontaneous turn
+        self.notified: list = []  # roots that notified since the current turn started (for the next turn)
+        self.turn_roots: list = []  # roots that notified before the current turn started (what woke it up)
         self.folded: dict = {}  # root -> result text, notifications injected into the turn in progress
         self.listeners: dict = {}  # owner key -> list of pending texts, for an open Assist reply
         self.jobs: list = []  # report jobs: {"owner", "root", "fallback", "not_before", "if_notified"}
@@ -177,8 +180,10 @@ class ClaudeSession:
             interrupted = [self.tasks[r] for r in roots if r in self.tasks]
             self.busy = False
             self.waiter = None
-            self.turn_owner = None
+            self.turn_owner = self.turn_req = None
+            self.restart_pending = False
             self.tasks, self.running, self.notified, self.folded, self.jobs = {}, set(), [], {}, []
+            self.turn_roots = []
             self.cond.notify_all()
         for task in interrupted:
             self._route(f'Your background task "{task["desc"]}" was interrupted because Claude Code was restarted'
@@ -200,9 +205,18 @@ class ClaudeSession:
             except ValueError:
                 continue
             kind, sub = event.get("type"), event.get("subtype")
+            if DEBUG and (kind == "result" or sub in ("init", "task_started", "task_notification",
+                                                      "background_tasks_changed") or event.get("isReplay")):
+                log("event " + json.dumps({k: event.get(k) for k in ("type", "subtype", "task_id", "status",
+                                           "parent_task_id", "is_backgrounded", "uuid", "origin") if event.get(k)}
+                                          | ({"tasks": [t.get("task_id") for t in event.get("tasks") or []]}
+                                             if sub == "background_tasks_changed" else {})
+                                          | ({"result": (event.get("result") or "")[:60]} if kind == "result" else {})))
             with self.cond:
                 if kind == "system" and sub == "init":
+                    # Notifications so far are what this turn reacts to; later ones belong to a later turn.
                     self.busy = True
+                    self.turn_roots, self.notified = self.turn_roots + self.notified, []
                 elif kind == "user" and event.get("isReplay"):
                     self._on_replay(event)
                 elif kind == "system" and sub == "task_started":
@@ -228,6 +242,7 @@ class ClaudeSession:
         if self.waiter and event.get("uuid") == self.waiter["uuid"]:
             self.waiter["acked"] = True
             self.turn_owner = self.waiter["owner"]
+            self.turn_req = self.waiter["uuid"]
             return
         if (event.get("origin") or {}).get("kind") == "task-notification":
             content = event.get("message", {}).get("content")
@@ -245,15 +260,18 @@ class ClaudeSession:
             return
         if parent:
             root = self._root(parent)
-            owner = self.tasks.get(root, {}).get("owner")
+            owner, req = self.tasks.get(root, {}).get("owner"), self.tasks.get(root, {}).get("req")
         elif event.get("is_backgrounded"):
             root = task_id
-            owner = self.turn_owner
-            if owner is None and self.notified:  # a spontaneous turn: it acts for whoever's task woke it up
-                owner = self.tasks.get(self.notified[0], {}).get("owner")
+            owner, req = self.turn_owner, self.turn_req
+            wakers = self.turn_roots or self.notified
+            if owner is None and wakers:  # a spontaneous turn: it acts for the task that woke it up
+                waker = self.tasks.get(wakers[0], {})
+                owner, req = waker.get("owner"), waker.get("req")
         else:
             return  # foreground tool call inside a turn
-        self.tasks[task_id] = {"owner": owner, "root": root, "desc": event.get("description") or "background task"}
+        self.tasks[task_id] = {"owner": owner, "req": req, "root": root,
+                               "desc": event.get("description") or "background task"}
 
     def _on_result(self, event: dict) -> None:
         if event.get("session_id") and event["session_id"] != self.state.get("session_id"):
@@ -266,11 +284,14 @@ class ClaudeSession:
             waiter = self.waiter if self.waiter and self.waiter["acked"] else None
             turn_owner = self.turn_owner
             folded, self.folded = self.folded, {}
-            self.turn_owner = None
+            self.turn_owner = self.turn_req = None
             if waiter:
                 self.waiter = None
                 waiter["result"] = (text, ok)
                 waiter["done"].set()
+                # Notifications from just before this user's turn may or may not have been answered in it;
+                # handle them like notifications that arrived during the turn.
+                self.notified, self.turn_roots = self.turn_roots + self.notified, []
                 # Someone else spoke while these tasks ran: Claude's own report turn may address the wrong person.
                 for root in self.running:
                     task = self.tasks.get(root)
@@ -279,7 +300,7 @@ class ClaudeSession:
             else:
                 # Spontaneous turn: it reports the tasks that notified since the last result. If another user asked
                 # something while a task ran, its text is not trusted for that owner; the bridge asks explicitly.
-                roots, self.notified = self.notified, []
+                roots, self.turn_roots = self.turn_roots, []
                 owners = {}
                 for root in roots:
                     task = self.tasks.get(root, {})
@@ -290,7 +311,17 @@ class ClaudeSession:
                                               "not_before": 0, "if_notified": False})
                         continue
                     owners[owner_key(task.get("owner"))] = (task.get("owner"), finished)
-                if text.strip() and (owners or not roots):
+                if not roots and (self.running or self.notified):
+                    # Woken by a running task without a notification (e.g. a Monitor output line): an interim
+                    # update. Only attributable if a single person has background work running (or just finished;
+                    # that finish is reported in the next turn).
+                    candidates = {owner_key(self.tasks.get(r, {}).get("owner")): self.tasks.get(r, {}).get("owner")
+                                  for r in self.running | set(self.notified)}
+                    if len(candidates) == 1 and text.strip():
+                        routes.append((text, list(candidates.values()), False))
+                    elif text.strip():
+                        log(f"interim update with several possible owners dropped: {text[:80]!r}")
+                elif text.strip() and (owners or not roots):
                     final = any(f for _, f in owners.values()) if owners else True
                     routes.append((text, [o for o, _ in owners.values()] or [None], final))
             # Notifications folded into this turn: the owner gets a separate report, unless it was their turn.
@@ -330,15 +361,17 @@ class ClaudeSession:
             else:
                 log(f"interim update for {owner_name(owner)} dropped (no open reply): {text[:80]!r}")
 
-    def _owner_active(self, key: tuple) -> bool:
-        """Is anything still going on whose result belongs to this owner?"""
-        if any(owner_key(self.tasks.get(r, {}).get("owner")) == key for r in self.running):
+    def _request_active(self, req: str) -> bool:
+        """Is work started by this request (its background tasks, their reports) still going on?
+
+        Only the request's own tasks count, so a long-running monitor started earlier does not keep every later
+        reply of the same user open.
+        """
+        def of_req(root: str) -> bool:
+            return self.tasks.get(root, {}).get("req") == req
+        if any(of_req(r) for r in self.running) or any(of_req(r) for r in self.notified + self.turn_roots):
             return True
-        if any(owner_key(j["owner"]) == key for j in self.jobs):
-            return True
-        if any(owner_key(self.tasks.get(r, {}).get("owner")) == key for r in self.notified):
-            return True
-        return self.busy and owner_key(self.turn_owner) == key
+        return any(of_req(j["root"]) for j in self.jobs)
 
     def task_summary(self, for_owner: dict | None) -> str:
         with self.cond:
@@ -364,6 +397,8 @@ class ClaudeSession:
                     waiter = {"done": threading.Event(), "result": None, "dead": False,
                               "uuid": str(uuid.uuid4()), "acked": False, "owner": owner}
                     self.waiter = waiter
+                    if owner is not None:
+                        owner["req"] = waiter["uuid"]
                 msg = {"type": "user", "uuid": waiter["uuid"],
                        "message": {"role": "user", "content": [{"type": "text", "text": text}]}}
                 try:
@@ -408,7 +443,7 @@ class ClaudeSession:
                 f"This message is delivered only to {who}."
             )
             log(f"report job for {who}: {task.get('desc')!r}")
-            text, ok = self.ask(prompt, owner=owner)
+            text, ok = self.ask(prompt, owner=dict(owner) if owner else None)
             if not ok or not text.strip():
                 text = job["fallback"]
             self._route(text, [owner], final=True)
@@ -420,6 +455,7 @@ class ClaudeSession:
         or when emit() raises (client gone). Later results become notifications/announcements.
         """
         key = owner_key(owner)
+        req = owner.get("req")
         mine: list = []
         with self.cond:
             self.listeners[key] = mine
@@ -428,7 +464,7 @@ class ClaudeSession:
         try:
             while True:
                 with self.cond:
-                    active = lambda: self._owner_active(key)  # noqa: E731
+                    active = lambda: self._request_active(req)  # noqa: E731
                     had_work = had_work or active()
                     self.cond.wait_for(lambda: mine or self.listeners.get(key) is not mine or not active(),
                                        timeout=15)
@@ -461,7 +497,8 @@ class ClaudeSession:
 
     def _maybe_restart(self) -> None:
         with self.cond:
-            if not self.restart_pending or self.busy or self.running or self.waiter or self.jobs or self.notified:
+            if (not self.restart_pending or self.busy or self.running or self.waiter or self.jobs or self.notified
+                    or self.turn_roots):
                 return
             self.restart_pending = False
         threading.Thread(target=self._restart_now, daemon=True).start()
@@ -470,6 +507,11 @@ class ClaudeSession:
         with self.lock:
             self._kill()
         log("session restarted, instructions reloaded on next message")
+
+    def restart_forced(self) -> None:
+        with self.lock:
+            self._kill("the instructions were changed")
+        log("session restarted now (forced), running background tasks were interrupted")
 
     def compact(self) -> None:
         started = time.time()
@@ -519,6 +561,7 @@ def status() -> dict:
         "compact_hour": COMPACT_HOUR,
         "running": SESSION.proc is not None and SESSION.proc.poll() is None,
         "background_tasks": SESSION.task_summary(None) or None,
+        "background_task_count": len(SESSION.running),
         "restart_pending": SESSION.restart_pending,
     }
 
@@ -605,6 +648,9 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/compact":
             threading.Thread(target=SESSION.compact, daemon=True).start()
             self._reply(202, {"ok": True})
+        elif path == "/restart":
+            SESSION.restart_forced()
+            self._reply(200, {"ok": True})
         elif path == "/reset":
             restart_session(new_conversation=True)
             self._reply(200, {"ok": True})
