@@ -71,7 +71,7 @@ class ClaudeCodeConversationEntity(conversation.ConversationEntity, conversation
                 resp.raise_for_status()
                 speech = (await resp.json())["speech"]
         except (aiohttp.ClientError, TimeoutError, KeyError, ValueError) as err:
-            speech = f"Claude Code is niet bereikbaar ({type(err).__name__})."
+            speech = f"Claude Code is not reachable ({type(err).__name__})."
 
         chat_log.async_add_assistant_content_without_tools(
             conversation.AssistantContent(agent_id=self.entity_id, content=speech)

@@ -125,7 +125,7 @@ class ClaudeSession:
                     except queue.Empty:
                         log(f"timeout after {timeout}s, restarting session")
                         self._kill()
-                        return "Dat duurde te lang, ik heb het afgebroken. Probeer het nog eens of vraag het korter.", False
+                        return "That took too long, so I stopped. Please try again or ask something shorter.", False
                     if line is None:  # process died; resume it and retry once
                         log(f"Claude Code exited (rc={self.proc.returncode})")
                         self._kill()
@@ -140,7 +140,7 @@ class ClaudeSession:
                         self.state["session_id"] = event["session_id"]
                         save_state(self.state)
                     return event.get("result") or "", not event.get("is_error")
-            return "Claude Code reageert niet. Kijk in het log van de Claude Code Assist app.", False
+            return "Claude Code is not responding. Check the log of the Claude Code Assist app.", False
 
     def compact(self) -> None:
         started = time.time()
@@ -212,14 +212,14 @@ class Handler(BaseHTTPRequestHandler):
             self._reply(404, {"error": "not found"})
             return
         context = (
-            f"[Home Assistant Assist | gebruiker: {req.get('user') or 'onbekend'}"
-            f" | apparaat: {req.get('device') or 'onbekend'} | taal: {req.get('language') or 'nl'}"
-            f" | tijd: {time.strftime('%Y-%m-%d %H:%M')}]"
+            f"[Home Assistant Assist | user: {req.get('user') or 'unknown'}"
+            f" | device: {req.get('device') or 'unknown'} | language: {req.get('language') or 'unknown'}"
+            f" | time: {time.strftime('%Y-%m-%d %H:%M')}]"
         )
         started = time.time()
         text, ok = SESSION.ask(f"{context}\n{req.get('text', '')}")
         log(f"{time.time() - started:.1f}s ok={ok} q={req.get('text', '')[:80]!r}")
-        self._reply(200, {"speech": to_speech(text) or "Ik heb geen antwoord gekregen.",
+        self._reply(200, {"speech": to_speech(text) or "I did not get an answer.",
                           "conversation_id": req.get("conversation_id")})
 
 
