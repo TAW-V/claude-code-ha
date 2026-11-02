@@ -164,6 +164,32 @@ def compact_scheduler() -> None:
             SESSION.compact()
 
 
+INGRESS_PROXY = "172.30.32.2"  # Supervisor ingress; HA already authenticated the (admin) user
+INSTRUCTIONS_FILE = os.path.join(WORKSPACE, "CLAUDE.md")
+UI_HTML = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui.html"), "rb").read()
+
+
+def restart_session(new_conversation: bool = False) -> None:
+    """Stop the Claude Code process; the next message starts it again (resumed unless new_conversation)."""
+    with SESSION.lock:
+        SESSION._kill()
+        if new_conversation:
+            SESSION.state.pop("session_id", None)
+            save_state(SESSION.state)
+    log("session reset, next message starts a new conversation" if new_conversation
+        else "session restarted, instructions reloaded on next message")
+
+
+def status() -> dict:
+    return {
+        "ok": True, "model": MODEL, "effort": EFFORT or "default",
+        "session_id": SESSION.state.get("session_id"),
+        "last_compact": SESSION.state.get("last_compact"),
+        "compact_hour": COMPACT_HOUR,
+        "running": SESSION.proc is not None and SESSION.proc.poll() is None,
+    }
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):  # silence default access log
         pass
@@ -176,51 +202,78 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _from_ingress(self) -> bool:
+        return self.client_address[0] == INGRESS_PROXY
+
+    def _body(self) -> dict | None:
+        try:
+            return json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+        except ValueError:
+            self._reply(400, {"error": "bad json"})
+            return None
+
     def do_GET(self):
-        if self.path == "/health":
-            self._reply(200, {
-                "ok": True, "model": MODEL, "effort": EFFORT or "default",
-                "session_id": SESSION.state.get("session_id"),
-                "last_compact": SESSION.state.get("last_compact"),
-                "running": SESSION.proc is not None and SESSION.proc.poll() is None,
-            })
+        path = self.path.split("?")[0]
+        if path == "/health":
+            self._reply(200, status())
+        elif self._from_ingress() and path in ("/", "/index.html"):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(UI_HTML)))
+            self.end_headers()
+            self.wfile.write(UI_HTML)
+        elif self._from_ingress() and path == "/api/status":
+            with open(INSTRUCTIONS_FILE) as f:
+                self._reply(200, {**status(), "instructions": f.read()})
         else:
             self._reply(404, {"error": "not found"})
 
     def do_POST(self):
-        if self.headers.get("Authorization") != f"Bearer {TOKEN}":
+        path = self.path.split("?")[0]
+        # Web UI (via ingress) uses /api/...; HA integration and scripts use the bearer token.
+        if path.startswith("/api/"):
+            if not self._from_ingress():
+                self._reply(403, {"error": "web UI only via Home Assistant ingress"})
+                return
+            path = path[4:]
+        elif self.headers.get("Authorization") != f"Bearer {TOKEN}":
             self._reply(401, {"error": "unauthorized"})
             return
-        try:
-            req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
-        except ValueError:
-            self._reply(400, {"error": "bad json"})
+        req = self._body()
+        if req is None:
             return
-        if self.path == "/compact":
+        if path == "/instructions":
+            text = (req.get("text") or "").replace("\r\n", "\n")
+            if not text.strip():
+                self._reply(400, {"error": "instructions cannot be empty"})
+                return
+            with open(INSTRUCTIONS_FILE + ".tmp", "w") as f:
+                f.write(text if text.endswith("\n") else text + "\n")
+            os.replace(INSTRUCTIONS_FILE + ".tmp", INSTRUCTIONS_FILE)
+            restart_session()
+            self._reply(200, {"ok": True})
+        elif path == "/instructions/default":
+            with open("/defaults/CLAUDE.md") as f:
+                self._reply(200, {"ok": True, "instructions": f.read()})
+        elif path == "/compact":
             threading.Thread(target=SESSION.compact, daemon=True).start()
             self._reply(202, {"ok": True})
-            return
-        if self.path == "/reset":
-            with SESSION.lock:
-                SESSION._kill()
-                SESSION.state.pop("session_id", None)
-                save_state(SESSION.state)
-            log("session reset, next message starts a new conversation")
+        elif path == "/reset":
+            restart_session(new_conversation=True)
             self._reply(200, {"ok": True})
-            return
-        if self.path != "/conversation":
+        elif path == "/conversation" and not self._from_ingress():
+            context = (
+                f"[Home Assistant Assist | user: {req.get('user') or 'unknown'}"
+                f" | device: {req.get('device') or 'unknown'} | language: {req.get('language') or 'unknown'}"
+                f" | time: {time.strftime('%Y-%m-%d %H:%M')}]"
+            )
+            started = time.time()
+            text, ok = SESSION.ask(f"{context}\n{req.get('text', '')}")
+            log(f"{time.time() - started:.1f}s ok={ok} q={req.get('text', '')[:80]!r}")
+            self._reply(200, {"speech": to_speech(text) or "I did not get an answer.",
+                              "conversation_id": req.get("conversation_id")})
+        else:
             self._reply(404, {"error": "not found"})
-            return
-        context = (
-            f"[Home Assistant Assist | user: {req.get('user') or 'unknown'}"
-            f" | device: {req.get('device') or 'unknown'} | language: {req.get('language') or 'unknown'}"
-            f" | time: {time.strftime('%Y-%m-%d %H:%M')}]"
-        )
-        started = time.time()
-        text, ok = SESSION.ask(f"{context}\n{req.get('text', '')}")
-        log(f"{time.time() - started:.1f}s ok={ok} q={req.get('text', '')[:80]!r}")
-        self._reply(200, {"speech": to_speech(text) or "I did not get an answer.",
-                          "conversation_id": req.get("conversation_id")})
 
 
 if __name__ == "__main__":

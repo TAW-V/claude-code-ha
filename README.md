@@ -41,12 +41,18 @@ Claude Code lives in an app because the regular terminal / code-server apps lose
 | `timeout_seconds` | `180` | Maximum time per request. |
 | `compact_hour` | `4` | Hour of the day (local time) at which the conversation is compacted with `/compact`. |
 | `extra_instructions` | – | Appended to the system prompt. |
-| `instructions` | built-in default | The assistant's `CLAUDE.md` (standing instructions). |
 
-The assistant's standing instructions (its `CLAUDE.md`) are the **`instructions`** option. Edit them in the app's
-**Configuration** tab (easiest via ⋮ → *Edit in YAML*, using a `|` block) to describe your home, then restart the app.
-If the option is empty, the built-in default from `rootfs/defaults/CLAUDE.md` is used. By default the assistant always
-answers in the language of the message it receives.
+## Web UI
+
+Open the app (**Open Web UI**, or **Claude Code** in the sidebar for admins) to:
+
+- edit the assistant's standing instructions (`CLAUDE.md`) in a full text editor — describe your home, preferences and
+  rules; changes apply from the next message, the conversation itself is kept;
+- see the session status, model/effort and last compaction;
+- **Compact now** or **Start new conversation**.
+
+The default instructions are in `rootfs/defaults/CLAUDE.md`; by default the assistant always answers in the language of
+the message it receives. The web UI is only reachable through Home Assistant ingress (Supervisor proxy).
 
 ## One continuous conversation
 
@@ -58,7 +64,7 @@ earlier questions and what it did. Each message carries a header with user, devi
 - Every day at `compact_hour` the conversation is compacted with `/compact` (Claude Code also auto-compacts when the
   context fills up).
 - Bridge endpoints (Bearer token required): `POST /conversation`, `POST /compact` (compact now),
-  `POST /reset` (start a new conversation). `GET /health` shows the session id and last compaction.
+  `POST /reset` (start a new conversation), `POST /instructions`. `GET /health` shows the session id and last compaction.
 
 ## ⚠️ Security
 

@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claude Code Assist</title>
+<style>
+  :root { color-scheme: light dark; --bg: #f5f5f5; --card: #fff; --fg: #212121; --muted: #666; --line: #ddd; --accent: #03a9f4; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #111; --card: #1c1c1c; --fg: #e1e1e1; --muted: #9b9b9b; --line: #333; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--fg); }
+  main { max-width: 1000px; margin: 0 auto; padding: 16px; display: flex; flex-direction: column; gap: 16px; min-height: 100vh; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+  h1 { font-size: 20px; margin: 0; } h2 { font-size: 16px; margin: 0 0 8px; }
+  .status { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 8px 16px; margin-top: 12px; }
+  .status div span { display: block; color: var(--muted); font-size: 12px; }
+  .status code { font-size: 12px; word-break: break-all; }
+  .editor { flex: 1; display: flex; flex-direction: column; }
+  textarea { flex: 1; min-height: 55vh; width: 100%; resize: vertical; padding: 12px; border: 1px solid var(--line); border-radius: 8px;
+             background: var(--bg); color: var(--fg); font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; tab-size: 2; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 12px; }
+  button { border: 1px solid var(--line); background: var(--card); color: var(--fg); border-radius: 8px; padding: 8px 14px; font: inherit; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .5; cursor: default; }
+  .msg { color: var(--muted); } .hint { color: var(--muted); font-size: 12px; margin: 4px 0 8px; }
+</style>
+</head>
+<body>
+<main>
+  <section class="card">
+    <h1>Claude Code Assist</h1>
+    <div class="status">
+      <div><span>Process</span><b id="running">…</b></div>
+      <div><span>Model / effort</span><b id="model">…</b></div>
+      <div><span>Last compaction</span><b id="compact">…</b></div>
+      <div><span>Session</span><code id="session">…</code></div>
+    </div>
+    <div class="row">
+      <button id="btnCompact">Compact now</button>
+      <button id="btnReset">Start new conversation</button>
+      <span class="msg" id="sessionMsg"></span>
+    </div>
+  </section>
+
+  <section class="card editor">
+    <h2>Instructions (CLAUDE.md)</h2>
+    <p class="hint">Standing instructions for the assistant: describe your home, preferences and rules. Saving reloads
+      them for the next message (the conversation itself is kept).</p>
+    <textarea id="text" spellcheck="false"></textarea>
+    <div class="row">
+      <button class="primary" id="btnSave" disabled>Save</button>
+      <button id="btnRevert" disabled>Discard changes</button>
+      <button id="btnDefault">Load default</button>
+      <span class="msg" id="saveMsg"></span>
+    </div>
+  </section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+let saved = "";
+
+async function api(path, body) {
+  const opts = body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
+  const res = await fetch("api/" + path, opts);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || res.statusText);
+  return data;
+}
+
+function dirty() {
+  const changed = $("text").value !== saved;
+  $("btnSave").disabled = !changed; $("btnRevert").disabled = !changed;
+  if (changed) $("saveMsg").textContent = "Unsaved changes";
+}
+
+async function refresh(loadText) {
+  const s = await api("status");
+  $("running").textContent = s.running ? "running" : "idle (starts on next message)";
+  $("model").textContent = `${s.model} / ${s.effort}`;
+  $("compact").textContent = (s.last_compact ? s.last_compact.replace("T", " ") : "never") + ` · daily at ${s.compact_hour}:00`;
+  $("session").textContent = s.session_id || "new conversation";
+  if (loadText) { saved = s.instructions; $("text").value = saved; dirty(); $("saveMsg").textContent = ""; }
+}
+
+$("text").addEventListener("input", dirty);
+$("btnSave").onclick = async () => {
+  $("btnSave").disabled = true; $("saveMsg").textContent = "Saving…";
+  try { await api("instructions", { text: $("text").value }); saved = $("text").value; dirty();
+        $("saveMsg").textContent = "Saved. Used from the next message."; refresh(false); }
+  catch (e) { $("saveMsg").textContent = "Error: " + e.message; dirty(); }
+};
+$("btnRevert").onclick = () => { $("text").value = saved; dirty(); $("saveMsg").textContent = ""; };
+$("btnDefault").onclick = async () => {
+  const d = await api("instructions/default", {});
+  $("text").value = d.instructions; dirty(); $("saveMsg").textContent = "Default loaded, not saved yet.";
+};
+$("btnCompact").onclick = async () => {
+  await api("compact", {}); $("sessionMsg").textContent = "Compacting in the background…";
+  setTimeout(() => refresh(false), 15000);
+};
+$("btnReset").onclick = async () => {
+  if (!confirm("Start a new conversation? The assistant forgets the current conversation (memory files are kept).")) return;
+  await api("reset", {}); $("sessionMsg").textContent = "Next message starts a new conversation."; refresh(false);
+};
+window.addEventListener("beforeunload", e => { if ($("text").value !== saved) e.preventDefault(); });
+refresh(true).catch(e => { $("saveMsg").textContent = "Error: " + e.message; });
+setInterval(() => refresh(false).catch(() => {}), 30000);
+</script>
+</body>
+</html>

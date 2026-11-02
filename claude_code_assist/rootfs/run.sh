@@ -29,13 +29,8 @@ if [ ! -s /data/bridge_token ]; then
 fi
 install -m 600 /data/bridge_token /config/.claude_code_assist_token
 
-# Assistant instructions (CLAUDE.md) come from the `instructions` option; built-in default if empty.
-INSTR=$(jq -r '.instructions // ""' "$OPTS")
-if [ -n "$INSTR" ]; then
-  printf '%s\n' "$INSTR" > /data/workspace/CLAUDE.md
-else
-  cp /defaults/CLAUDE.md /data/workspace/CLAUDE.md
-fi
+# Assistant instructions (CLAUDE.md): edited in the app's web UI; built-in default on first start.
+if [ ! -s /data/workspace/CLAUDE.md ]; then cp /defaults/CLAUDE.md /data/workspace/CLAUDE.md; fi
 
 if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && [ ! -f "$HOME/.claude/.credentials.json" ]; then
   echo "[cca] WARNING: no oauth_token set. Run 'claude setup-token' and paste the token in the app options."
