@@ -68,8 +68,9 @@ Everyone shares one conversation, but **background results belong to whoever sta
   asks Claude separately to report the result to the task's owner. The header of every message lists the running
   background tasks and who started them, and the default instructions tell Claude not to mention other people's
   results.
-- An open reply only waits for work started by *that* question, so a long-running task (a monitor, a `sleep 600`)
-  does not keep later replies of the same user open.
+- An open reply waits for the work started by its question. If you ask something new in the same chat while a reply
+  is still waiting, the new reply takes over that work, so the result appears under your newest answer instead of
+  being pushed. Replies are open for at most `followup_wait_seconds`.
 - Results of tools that wake Claude without a notification (e.g. Monitor output lines) are interim updates: shown in
   the owner's open chat when only one person has background work running, otherwise dropped.
 - Saving instructions waits until no background task is running before restarting Claude Code. The web UI shows when

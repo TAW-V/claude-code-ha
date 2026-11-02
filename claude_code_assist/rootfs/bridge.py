@@ -134,6 +134,7 @@ class ClaudeSession:
         self.turn_roots: list = []  # roots that notified before the current turn started (what woke it up)
         self.folded: dict = {}  # root -> result text, notifications injected into the turn in progress
         self.listeners: dict = {}  # owner key -> list of pending texts, for an open Assist reply
+        self.listener_reqs: dict = {}  # owner key -> requests whose work that open reply is waiting for
         self.jobs: list = []  # report jobs: {"owner", "root", "fallback", "not_before", "if_notified"}
         self.restart_pending = False
         threading.Thread(target=self._job_worker, daemon=True).start()
@@ -458,17 +459,20 @@ class ClaudeSession:
         notifications/announcements, like later results.
         """
         key = owner_key(owner)
-        req = owner.get("req")
         mine: list = []
         with self.cond:
+            # A new question from the same chat takes over the open reply, including the work it was waiting for,
+            # so results of earlier questions appear under the newest answer instead of being pushed.
+            reqs = {owner.get("req")} | (self.listener_reqs.get(key, set()) if key in self.listeners else set())
             self.listeners[key] = mine
+            self.listener_reqs[key] = reqs
         deadline = time.time() + max_wait
         had_work = False
         undelivered: list = []
         try:
             while True:
                 with self.cond:
-                    active = lambda: self._request_active(req)  # noqa: E731
+                    active = lambda: any(self._request_active(r) for r in reqs)  # noqa: E731
                     had_work = had_work or active()
                     self.cond.wait_for(lambda: mine or self.listeners.get(key) is not mine or not active(),
                                        timeout=15)
@@ -497,6 +501,7 @@ class ClaudeSession:
             with self.cond:
                 if self.listeners.get(key) is mine:
                     del self.listeners[key]
+                    self.listener_reqs.pop(key, None)
                 leftover, mine[:] = undelivered + list(mine), []
             for text in leftover:
                 threading.Thread(target=deliver_followup, args=(text, owner), daemon=True).start()
