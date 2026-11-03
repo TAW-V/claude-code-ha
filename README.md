@@ -140,7 +140,8 @@ themselves.
 - see the session status, model/effort, Claude Code version and last compaction;
 - **Compact now**, **Start new conversation** or **Update Claude Code now**;
 - **Automation tasks**: recent runs of `claude_code_agent.run_task`;
-- **Session**: a read-only, live view of the raw Claude Code session (messages, tool calls and results).
+- **Session**: a read-only, live view of the raw Claude Code session (messages, tool calls and results). It starts at
+  the last compaction, i.e. what Claude currently sees; tick *show history before the last compaction* for the rest.
 
 The default instructions are in `rootfs/defaults/CLAUDE.md`; by default the assistant always answers in the language of
 the message it receives. The web UI is only reachable through Home Assistant ingress (Supervisor proxy).

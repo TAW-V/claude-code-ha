@@ -105,6 +105,7 @@
     <div class="row" style="margin-top:0">
       <button id="btnSession">Show session</button>
       <label id="sessionOpts" hidden><input type="checkbox" id="showThinking"> show thinking</label>
+      <label id="sessionOpts2" hidden><input type="checkbox" id="showEarlier"> show history before the last compaction</label>
       <span class="msg" id="sessionInfo"></span>
     </div>
     <div id="sessionLog" hidden></div>
@@ -302,24 +303,27 @@ async function pollSession() {
   if (!sessOpen || $("settingsView").hidden) return;
   try {
     const log = $("sessionLog"), nearBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
-    const q = sessOffset === null ? "" : `?offset=${sessOffset}&sid=${encodeURIComponent(sessId || "")}`;
+    const q = sessOffset === null ? ($("showEarlier").checked ? "?full=1" : "")
+      : `?offset=${sessOffset}&sid=${encodeURIComponent(sessId || "")}`;
     const d = await api("session" + q);
     if (d.reset) { log.innerHTML = ""; }
     sessOffset = d.offset; sessId = d.session_id || "";
     d.items.forEach(addItem);
     if (d.reset) $("sessionInfo").textContent = !d.session_id ? "No conversation yet." :
-      (d.clipped ? "Showing the most recent part of the session." : "");
+      (d.clipped ? "Showing the most recent part of the session." :
+       d.earlier ? "Showing the conversation since the last compaction (what Claude currently sees)." : "");
     if (d.reset || (d.items.length && nearBottom)) log.scrollTop = log.scrollHeight;
   } catch (e) { $("sessionInfo").textContent = "Error: " + e.message; }
 }
 $("btnSession").onclick = () => {
   sessOpen = !sessOpen;
-  $("sessionLog").hidden = !sessOpen; $("sessionOpts").hidden = !sessOpen;
+  $("sessionLog").hidden = !sessOpen; $("sessionOpts").hidden = !sessOpen; $("sessionOpts2").hidden = !sessOpen;
   $("btnSession").textContent = sessOpen ? "Hide session" : "Show session";
   clearInterval(sessTimer);
   if (sessOpen) { sessOffset = null; pollSession(); sessTimer = setInterval(pollSession, 3000); }
   else { $("sessionLog").innerHTML = ""; $("sessionInfo").textContent = ""; }
 };
+$("showEarlier").onchange = () => { sessOffset = null; pollSession(); };
 $("showThinking").onchange = () => document.querySelectorAll(".it.thinking").forEach(el => el.hidden = !$("showThinking").checked);
 show("chat");
 poll().then(scrollDown);

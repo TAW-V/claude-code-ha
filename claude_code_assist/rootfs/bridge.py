@@ -937,11 +937,40 @@ def session_items(entry: dict) -> list:
     return items
 
 
-def session_since(offset: int | None, sid: str | None) -> dict:
-    """Items of the current transcript from byte offset on (the tail of it on first load or a new session)."""
+def last_compaction(path: str, size: int) -> int:
+    """Byte offset of the line with the last compact boundary (0 if none): Claude Code keeps the history before a
+    compaction in the same file, but the model only sees what comes after it."""
+    pos, carry = size, b""
+    with open(path, "rb") as f:
+        while pos > 0:
+            start = max(0, pos - 1_000_000)
+            f.seek(start)
+            chunk = f.read(pos - start) + carry
+            lines = chunk.split(b"\n")
+            carry = lines[0] if start > 0 else b""  # possibly partial: joined with the next (earlier) chunk
+            off = start + len(lines[0]) + 1 if start > 0 else 0
+            found = None
+            for line in (lines[1:] if start > 0 else lines):
+                if b"compact_boundary" in line:
+                    try:
+                        e = json.loads(line)
+                        if e.get("type") == "system" and e.get("subtype") == "compact_boundary":
+                            found = off
+                    except ValueError:
+                        pass
+                off += len(line) + 1
+            if found is not None:
+                return found
+            pos = start
+    return 0
+
+
+def session_since(offset: int | None, sid: str | None, full: bool = False) -> dict:
+    """Items of the current transcript from byte offset on. On first load (or a new session): from the last
+    compaction on, or with full=True the earlier history too; at most the last SESSION_TAIL bytes."""
     path = session_file()
     current = SESSION.state.get("session_id")
-    out = {"session_id": current, "items": [], "offset": 0, "reset": False, "clipped": False}
+    out = {"session_id": current, "items": [], "offset": 0, "reset": False, "clipped": False, "earlier": False}
     if not path:
         out["reset"] = sid != current
         return out
@@ -950,10 +979,15 @@ def session_since(offset: int | None, sid: str | None) -> dict:
         out["reset"] = True
         offset = max(0, size - SESSION_TAIL)
         out["clipped"] = offset > 0
+        if not full:
+            boundary = last_compaction(path, size)
+            out["earlier"] = boundary > 0
+            if boundary > offset:
+                offset, out["clipped"] = boundary, False
     with open(path, "rb") as f:
         f.seek(offset)
         data = f.read(size - offset)
-    if out["reset"] and offset > 0:  # started mid-line
+    if out["reset"] and out["clipped"]:  # started mid-line
         cut = data.find(b"\n") + 1
         data, offset = data[cut:], offset + cut
     end = data.rfind(b"\n") + 1  # only complete lines; the rest is read next time
@@ -1088,7 +1122,8 @@ class Handler(BaseHTTPRequestHandler):
         elif self._from_ingress() and path == "/api/session":
             offset = re.search(r"offset=(\d+)", query)
             sid = re.search(r"sid=([\w-]+)", query)
-            self._reply(200, session_since(int(offset[1]) if offset else None, sid[1] if sid else None))
+            self._reply(200, session_since(int(offset[1]) if offset else None, sid[1] if sid else None,
+                                           "full=1" in query))
         elif self._from_ingress() and path == "/api/status":
             with open(INSTRUCTIONS_FILE) as f:
                 self._reply(200, {**status(), "instructions": f.read()})
