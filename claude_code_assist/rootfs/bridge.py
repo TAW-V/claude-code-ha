@@ -372,8 +372,12 @@ class ClaudeSession:
                 elif kind == "system" and sub == "task_started":
                     self._on_task_started(event)
                 elif kind == "system" and sub == "task_notification":
-                    root = self._root(event.get("task_id", ""))
-                    if root in self.tasks and root not in self.notified:
+                    task_id = event.get("task_id", "")
+                    root = self._root(task_id)
+                    # A subagent's own background task (a Bash command, a nested agent) finishing is not the end of
+                    # the work: only the root task's notification is, or a late child of a root that already ended.
+                    if (root in self.tasks and root not in self.notified
+                            and (task_id == root or root not in self.running)):
                         self.notified.append(root)
                 elif kind == "system" and sub == "background_tasks_changed":
                     ids = {t.get("task_id") for t in event.get("tasks") or []}
@@ -599,6 +603,8 @@ class ClaudeSession:
                     if job["root"] not in self.notified:
                         continue  # a spontaneous turn reported it in the meantime
                     self.notified.remove(job["root"])
+                    if job["root"] in self.running:
+                        continue  # still running after all; its own notification will follow
                 task = self.tasks.get(job["root"], {})
             owner = job["owner"]
             who = owner_name(owner)
