@@ -160,7 +160,7 @@ earlier questions and what it did. Each message carries a header with user, devi
 
 ## ⚠️ Security
 
-The app runs Claude Code with **full access**: shell, read/write on `/config`, `/addons`, `/share`, and the
+The app runs Claude Code with **full access**: shell, read/write on `/config`, `/addons`, `/share`, `/addon_configs` (all apps), and the
 Home Assistant and Supervisor APIs (`hassio_role: admin`). Anyone who can use Assist in your Home Assistant can ask it to
 do anything. The default instructions ask for confirmation before destructive actions, but that is guidance for the
 model, not an enforced permission. Restrict `--allowedTools` in `rootfs/bridge.py` if you want less.
