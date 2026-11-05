@@ -83,6 +83,24 @@ def ha_call(path: str, body: dict) -> None:
     ha_request("POST", path, body)
 
 
+_PANEL_PATH: list = []
+
+
+def panel_path() -> str | None:
+    """Sidebar path of this app's panel (/<slug>), so tapping a notification opens it; cached."""
+    if not _PANEL_PATH:
+        try:
+            req = urllib.request.Request(
+                "http://supervisor/addons/self/info",
+                headers={"Authorization": f"Bearer {os.environ.get('SUPERVISOR_TOKEN', '')}"})
+            slug = json.loads(urllib.request.urlopen(req, timeout=10).read())["data"]["slug"]
+            _PANEL_PATH.append(f"/{slug}")
+        except Exception as err:  # noqa: BLE001
+            log(f"panel path lookup failed: {err}")
+            return None
+    return _PANEL_PATH[0]
+
+
 # ---------- inbox: results that reached the user outside the chat are shown at the top of their next reply ----------
 INBOX_LOCK = threading.Lock()
 
@@ -231,9 +249,12 @@ def deliver_followup(text: str, requester: dict) -> None:
     for service in targets.get("notify", []):
         domain, _, name = service.partition(".")
         short = summary(text)
+        data = {"tag": "claude_code_assist", "group": "claude_code_assist"}
+        if panel := panel_path():
+            data |= {"clickAction": panel, "url": panel}  # Android / iOS: tap opens the Claude Code panel
         calls.append((f"services/{domain}/{name}", {
             "title": "Claude Code", "message": short + "\n(Send any message in Assist to see the full answer.)",
-            "data": {"tag": "claude_code_assist", "group": "claude_code_assist"},
+            "data": data,
         }))
     if not calls:
         calls = [("services/persistent_notification/create", {"title": "Claude Code", "message": text})]
