@@ -39,6 +39,15 @@ check the user in the header and do not assume the previous message came from th
 - Every day just before the conversation is compacted, the bridge deletes temporary automations whose time has passed.
   Never use this prefix for permanent automations, and tell the user when you create a temporary one.
 
+## Other temporary things
+- The same applies to everything else that is only needed for a while: dashboards or views to look at something once,
+  helpers, scripts, test entities. Give them a name or title starting with `TMP until YYYY-MM-DD HH:MM | `. A
+  temporary view goes into an existing dashboard as a hidden subview (`subview: true`, path `tmp-<subject>`), not as
+  a separate dashboard; leave the other views of that dashboard untouched.
+- The bridge only cleans up automations. Delete other temporary things yourself when the user says they are done, or
+  when you notice their time has passed. Creating something as temporary counts as the confirmation for deleting it
+  later. If the user wants to keep it, offer to make it permanent (for example move a view into an existing dashboard).
+
 ## New automations and scripts
 - Before creating a new automation or script, look for existing ones that are related: the same purpose, the same
   devices or the same trigger. Check both the YAML files in `/config` and the automation/script config in Home
@@ -81,6 +90,25 @@ check the user in the header and do not assume the previous message came from th
 - That folder is Home Assistant's local media: tell the user they can open it via Media → My media → claude in the
   sidebar, and mention the file name.
 
+## Live views on a screen
+- When someone wants to see live information on a screen (TV, tablet, PC), build a full-screen live view instead of a
+  static image: a hidden panel subview in an existing dashboard (temporary unless the user wants to keep it, see
+  Other temporary things). Use big readable numbers
+  (`custom:button-card`, font sizes in `vh` so it fits without scrolling) and, where useful, an existing graphical
+  card (for example `custom:power-sankey` for energy flows). Use live entities so it updates by itself.
+- Open it on the target screen: for a browser registered in browser_mod use `browser_mod.navigate` with its
+  `browser_id`; for a quick look use `browser_mod.popup`. A smart TV whose browser is not open yet can often be
+  started with its integration's launch command (for an LG webOS TV: `webostv.command` with command
+  `system.launcher/open` and payload `{"target": "<Home Assistant URL>/<dashboard>/<view>"}`). Keep device names,
+  entity ids and addresses of a specific home in the user's notes, not here.
+- For true full screen, set `hideSidebar` and `hideHeader` in browser_mod for that browser only, never for a user or
+  globally (users log in on several devices).
+- Make sure the target device can open it: check which Home Assistant user that browser or device is logged in as,
+  and that this user may see the dashboard (not `require_admin` for a non-admin user, no view `visible` restriction
+  excluding them). Pick a dashboard that user can access, or adjust only that view's visibility.
+- This is a dashboard change, so it follows the rules above. Tell the user the path so they can reopen it, and whether
+  it is temporary.
+
 ## Access
 - Home Assistant REST API: `curl -s -H "Authorization: Bearer $SUPERVISOR_TOKEN" http://supervisor/core/api/...`
   (states, services/<domain>/<service>, history/period, template).
@@ -88,8 +116,10 @@ check the user in the header and do not assume the previous message came from th
 - Files: `/config` (Home Assistant configuration), `/addons`, `/share`, `/media` (Home Assistant's local media).
 - Your home directory (`/data/home`) and workspace (`/data/workspace`) are persistent: your memory and session
   history survive restarts and updates.
-- If the user keeps notes about their home in `/config` (for example `/config/claude/MEMORY.md`), read them when a
-  question is about the installation or earlier analyses.
+- Home- and user-specific knowledge (device and entity details, IP addresses, preferences, project notes, earlier
+  analyses) is saved in `/config/claude/`, one topic per file with a one-line pointer in `/config/claude/MEMORY.md`.
+  Read that index when a question is about the installation or earlier work. Keep this file (CLAUDE.md) generic: it
+  must not contain details of a specific home.
 
 ## Safety
 - You have full access. Only perform drastic or hard-to-reverse actions (restarts, stopping apps, deleting files or
